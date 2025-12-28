@@ -44,8 +44,26 @@ class VectorStore:
         # Create data directory if it doesn't exist
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        # TODO: Initialize memory-mapped file
-        # TODO: Initialize metadata tracking (vector count, deleted vectors)
+        # Paths for storage files
+        self.vectors_path = self.data_dir / "vectors.mmap"
+        self.metadata_path = self.data_dir / "metadata.npz"
+
+        # Track current vector count
+        self.count = 0
+
+        # Initialize or load memory-mapped file
+        if self.vectors_path.exists():
+            # Load existing store
+            self._load()
+        else:
+            # Create new memory-mapped file
+            # Shape: (max_vectors, dimension)
+            self.vectors = np.memmap(
+                self.vectors_path,
+                dtype=self.dtype,
+                mode='w+',
+                shape=(self.max_vectors, self.dimension)
+            )
 
     def insert(self, vector: np.ndarray, vector_id: Optional[int] = None) -> int:
         """
@@ -58,8 +76,28 @@ class VectorStore:
         Returns:
             ID of the inserted vector
         """
-        # TODO: Implement vector insertion
-        pass
+        # Validate vector dimension
+        if len(vector) != self.dimension:
+            raise ValueError(f"Vector dimension {len(vector)} does not match store dimension {self.dimension}")
+
+        # Check capacity
+        if self.count >= self.max_vectors:
+            raise RuntimeError(f"Vector store is full (max: {self.max_vectors})")
+
+        # Assign ID (auto-increment for now)
+        if vector_id is None:
+            vector_id = self.count
+
+        # Store the vector
+        self.vectors[vector_id] = vector
+
+        # Increment count
+        self.count += 1
+
+        # Flush to disk
+        self.vectors.flush()
+
+        return vector_id
 
     def get(self, vector_id: int) -> np.ndarray:
         """
@@ -71,8 +109,12 @@ class VectorStore:
         Returns:
             Vector data (dimension,)
         """
-        # TODO: Implement vector retrieval
-        pass
+        # Validate ID
+        if vector_id < 0 or vector_id >= self.count:
+            raise ValueError(f"Invalid vector_id {vector_id}. Valid range: [0, {self.count})")
+
+        # Return the vector (creates a copy to avoid mutation)
+        return np.array(self.vectors[vector_id])
 
     def delete(self, vector_id: int) -> None:
         """
@@ -91,10 +133,31 @@ class VectorStore:
         Returns:
             Array of vectors (n_vectors x dimension)
         """
-        # TODO: Implement bulk retrieval
-        pass
+        # Return only the vectors we've inserted (0 to count)
+        return np.array(self.vectors[:self.count])
 
     def close(self) -> None:
         """Close the vector store and flush to disk."""
-        # TODO: Implement cleanup
-        pass
+        # Save metadata (vector count)
+        np.savez(self.metadata_path, count=self.count)
+
+        # Flush memory-mapped file
+        if hasattr(self, 'vectors'):
+            self.vectors.flush()
+
+    def _load(self) -> None:
+        """Load existing vector store from disk."""
+        # Load metadata
+        if self.metadata_path.exists():
+            metadata = np.load(self.metadata_path)
+            self.count = int(metadata['count'])
+        else:
+            self.count = 0
+
+        # Load memory-mapped file
+        self.vectors = np.memmap(
+            self.vectors_path,
+            dtype=self.dtype,
+            mode='r+',
+            shape=(self.max_vectors, self.dimension)
+        )
