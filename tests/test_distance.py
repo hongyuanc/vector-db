@@ -18,13 +18,33 @@ class TestDistanceMetrics:
 
     def test_cosine_similarity_identical_vectors(self):
         """Test that cosine similarity of identical vectors is 1."""
-        # TODO: Implement test
-        pass
+        a = np.array([1.0, 2.0, 3.0, 4.0])
+        b = np.array([1.0, 2.0, 3.0, 4.0])
+        similarity = cosine_similarity(a, b)
+        assert similarity == pytest.approx(1.0), f"Expected 1.0, got {similarity}"
 
     def test_cosine_similarity_orthogonal_vectors(self):
         """Test that cosine similarity of orthogonal vectors is 0."""
-        # TODO: Implement test
-        pass
+        # In 2D: (1,0) and (0,1) are perpendicular (90 degrees)
+        a = np.array([1.0, 0.0])
+        b = np.array([0.0, 1.0])
+        similarity = cosine_similarity(a, b)
+        assert similarity == pytest.approx(0.0), f"Expected 0.0, got {similarity}"
+
+    def test_cosine_similarity_opposite_vectors(self):
+        """Test that cosine similarity of opposite vectors is -1."""
+        a = np.array([1.0, 2.0, 3.0])
+        b = np.array([-1.0, -2.0, -3.0])
+        similarity = cosine_similarity(a, b)
+        assert similarity == pytest.approx(-1.0), f"Expected -1.0, got {similarity}"
+
+    def test_cosine_similarity_magnitude_independent(self):
+        """Test that cosine similarity is independent of magnitude."""
+        # Same direction, different lengths -> should have similarity of 1
+        a = np.array([1.0, 2.0, 3.0])
+        b = np.array([2.0, 4.0, 6.0])  # 2x of a
+        similarity = cosine_similarity(a, b)
+        assert similarity == pytest.approx(1.0), f"Expected 1.0, got {similarity}"
 
     def test_euclidean_distance_identical_vectors(self):
         """Test that Euclidean distance of identical vectors is 0."""
@@ -51,8 +71,29 @@ class TestDistanceMetrics:
 
     def test_dot_product(self):
         """Test dot product calculation."""
-        # TODO: Implement test
-        pass
+        # Simple test: [1,2,3] · [4,5,6] = 1*4 + 2*5 + 3*6 = 4 + 10 + 18 = 32
+        a = np.array([1.0, 2.0, 3.0])
+        b = np.array([4.0, 5.0, 6.0])
+        result = dot_product(a, b)
+        assert result == pytest.approx(32.0), f"Expected 32.0, got {result}"
+
+    def test_dot_product_orthogonal(self):
+        """Test that orthogonal vectors have dot product of 0."""
+        a = np.array([1.0, 0.0])
+        b = np.array([0.0, 1.0])
+        result = dot_product(a, b)
+        assert result == pytest.approx(0.0), f"Expected 0.0, got {result}"
+
+    def test_dot_product_equals_cosine_for_normalized(self):
+        """For normalized vectors, dot product should equal cosine similarity."""
+        # Create a normalized vector (unit length)
+        a = np.array([0.6, 0.8])  # magnitude = sqrt(0.36 + 0.64) = 1.0
+        b = np.array([0.8, 0.6])  # magnitude = sqrt(0.64 + 0.36) = 1.0
+
+        dot = dot_product(a, b)
+        cos = cosine_similarity(a, b)
+
+        assert dot == pytest.approx(cos), f"Dot={dot}, Cosine={cos} should be equal"
 
     def test_batch_operations(self):
         """Test batch distance calculations."""

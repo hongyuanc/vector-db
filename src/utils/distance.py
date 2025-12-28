@@ -19,17 +19,36 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """
     Compute cosine similarity between two vectors.
 
-    Formula: 1 - (A·B)/(||A||·||B||)
+    Formula: (A·B)/(||A||·||B||)
 
     Args:
         a: First vector (numpy array)
         b: Second vector (numpy array)
 
     Returns:
-        Cosine similarity (0 = orthogonal, 1 = identical)
+        Cosine similarity (0 = orthogonal, 1 = identical, -1 = opposite)
     """
-    # TODO: Implement cosine similarity
-    pass
+    # Compute dot product
+    dot = 0.0
+    for i in range(len(a)):
+        dot += a[i] * b[i]
+
+    # Compute magnitudes (L2 norms)
+    norm_a = 0.0
+    norm_b = 0.0
+    for i in range(len(a)):
+        norm_a += a[i] * a[i]
+        norm_b += b[i] * b[i]
+
+    norm_a = np.sqrt(norm_a)
+    norm_b = np.sqrt(norm_b)
+
+    # Avoid division by zero
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+
+    # Return cosine similarity
+    return dot / (norm_a * norm_b)
 
 
 @jit(nopython=True)
@@ -63,7 +82,7 @@ def dot_product(a: np.ndarray, b: np.ndarray) -> float:
     """
     Compute dot product between two vectors.
 
-    Formula: A·B
+    Formula: A·B = Σ(a[i] × b[i])
 
     Args:
         a: First vector (numpy array)
@@ -72,8 +91,10 @@ def dot_product(a: np.ndarray, b: np.ndarray) -> float:
     Returns:
         Dot product (higher = more similar for normalized vectors)
     """
-    # TODO: Implement dot product
-    pass
+    result = 0.0
+    for i in range(len(a)):
+        result += a[i] * b[i]
+    return result
 
 
 def batch_cosine_similarity(queries: np.ndarray, vectors: np.ndarray) -> np.ndarray:
