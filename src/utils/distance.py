@@ -46,8 +46,16 @@ def euclidean_distance(a: np.ndarray, b: np.ndarray) -> float:
     Returns:
         Euclidean distance (0 = identical, larger = more different)
     """
-    # TODO: Implement Euclidean distance
-    pass
+    # Compute squared differences element-wise
+    diff = a - b
+
+    # Sum of squares
+    squared_sum = 0.0
+    for i in range(len(diff)):
+        squared_sum += diff[i] * diff[i]
+
+    # Return square root
+    return np.sqrt(squared_sum)
 
 
 @jit(nopython=True)
