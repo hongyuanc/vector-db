@@ -28,19 +28,37 @@ class BruteForceIndex(VectorIndex):
         Args:
             metric: Distance metric ("euclidean" or "cosine")
         """
+        if metric not in ["euclidean", "cosine"]:
+            raise ValueError(f"Unsupported metric: {metric}. Use 'euclidean' or 'cosine'")
+
         self.metric = metric
         self.vectors: np.ndarray = None
         self.vector_ids: List[int] = []
 
+        # Select distance function
+        if metric == "euclidean":
+            self.distance_fn = euclidean_distance
+        else:  # cosine
+            self.distance_fn = cosine_similarity
+
     def build(self, vectors: np.ndarray) -> None:
         """Build the index from vectors."""
-        # TODO: Implement build
-        pass
+        # Store all vectors
+        self.vectors = np.array(vectors)
+
+        # Auto-assign vector IDs (0, 1, 2, ...)
+        self.vector_ids = list(range(len(vectors)))
 
     def insert(self, vector: np.ndarray, vector_id: int) -> None:
         """Insert a vector."""
-        # TODO: Implement insert
-        pass
+        # Add to vectors array
+        if self.vectors is None:
+            self.vectors = np.array([vector])
+        else:
+            self.vectors = np.vstack([self.vectors, vector])
+
+        # Add ID
+        self.vector_ids.append(vector_id)
 
     def search(self, query: np.ndarray, k: int) -> List[Tuple[int, float]]:
         """
@@ -48,20 +66,60 @@ class BruteForceIndex(VectorIndex):
 
         Computes distance to all vectors and returns top-k.
         """
-        # TODO: Implement search
-        pass
+        if self.vectors is None or len(self.vectors) == 0:
+            return []
+
+        # Ensure k doesn't exceed number of vectors
+        k = min(k, len(self.vectors))
+
+        # Compute distance to all vectors
+        distances = []
+        for i, vec in enumerate(self.vectors):
+            dist = self.distance_fn(query, vec)
+            distances.append((self.vector_ids[i], dist))
+
+        # Sort by distance
+        # For cosine similarity, higher is better, so negate for sorting
+        if self.metric == "cosine":
+            # Sort descending (higher similarity = better)
+            distances.sort(key=lambda x: -x[1])
+        else:
+            # Sort ascending (lower distance = better)
+            distances.sort(key=lambda x: x[1])
+
+        # Return top-k
+        return distances[:k]
 
     def delete(self, vector_id: int) -> None:
         """Delete a vector."""
-        # TODO: Implement delete
-        pass
+        # Find index of vector_id
+        if vector_id not in self.vector_ids:
+            raise ValueError(f"Vector ID {vector_id} not found")
+
+        idx = self.vector_ids.index(vector_id)
+
+        # Remove from vectors and IDs
+        self.vectors = np.delete(self.vectors, idx, axis=0)
+        self.vector_ids.pop(idx)
 
     def save(self, filepath: str) -> None:
         """Save index to disk."""
-        # TODO: Implement save
-        pass
+        np.savez(
+            filepath,
+            vectors=self.vectors,
+            vector_ids=np.array(self.vector_ids),
+            metric=self.metric,
+        )
 
     def load(self, filepath: str) -> None:
         """Load index from disk."""
-        # TODO: Implement load
-        pass
+        data = np.load(filepath, allow_pickle=True)
+        self.vectors = data['vectors']
+        self.vector_ids = data['vector_ids'].tolist()
+        self.metric = str(data['metric'])
+
+        # Re-initialize distance function
+        if self.metric == "euclidean":
+            self.distance_fn = euclidean_distance
+        else:
+            self.distance_fn = cosine_similarity
