@@ -14,8 +14,9 @@ Key concepts:
 
 import numpy as np
 from typing import List, Tuple, Dict, Set
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from .base import VectorIndex
+from ..utils.distance import euclidean_distance, cosine_similarity
 
 
 @dataclass
@@ -24,7 +25,7 @@ class HNSWNode:
     vector_id: int
     layer: int
     # connections[layer] = set of neighbor IDs
-    connections: Dict[int, Set[int]]
+    connections: Dict[int, Set[int]] = field(default_factory=lambda: {})
 
 
 class HNSWIndex(VectorIndex):
@@ -56,11 +57,21 @@ class HNSWIndex(VectorIndex):
             ml: Layer assignment multiplier
             metric: Distance metric
         """
+        # Validate metric
+        if metric not in ["euclidean", "cosine"]:
+            raise ValueError(f"Unsupported metric: {metric}. Use 'euclidean' or 'cosine'")
+
         self.M = M
         self.ef_construction = ef_construction
         self.ef_search = ef_search
         self.ml = ml
         self.metric = metric
+
+        # Select distance function
+        if metric == "euclidean":
+            self.distance_fn = euclidean_distance
+        else:  # cosine
+            self.distance_fn = cosine_similarity
 
         # Graph structure
         self.nodes: Dict[int, HNSWNode] = {}
@@ -76,8 +87,17 @@ class HNSWIndex(VectorIndex):
 
         Uses exponential decay: l = floor(-ln(uniform(0,1)) * ml)
         """
-        # TODO: Implement layer assignment
-        pass
+        # Generate random float in (0, 1) - avoid exactly 0 which would cause ln(0) = -inf
+        uniform_random = np.random.uniform(0, 1)
+
+        # Avoid edge case of exactly 0
+        if uniform_random < 1e-9:
+            uniform_random = 1e-9
+
+        # Apply exponential decay formula
+        layer = int(-np.log(uniform_random) * self.ml)
+
+        return layer
 
     def build(self, vectors: np.ndarray) -> None:
         """
@@ -139,13 +159,39 @@ class HNSWIndex(VectorIndex):
         self, candidates: List[Tuple[int, float]], M: int
     ) -> List[int]:
         """
-        Select M neighbors from candidates using heuristic.
+        Select M neighbors from candidates using simple heuristic.
 
-        Simple: Select M nearest
-        Advanced: Consider diversity to maintain graph navigability
+        Simple heuristic:
+        - Sort candidates by distance
+        - Take M nearest neighbors
+        - Fast and effective (used in production systems)
+
+        Args:
+            candidates: List of (vector_id, distance) tuples
+            M: Maximum number of neighbors to select
+
+        Returns:
+            List of selected vector IDs
         """
-        # TODO: Implement neighbor selection
-        pass
+        # Handle edge case: fewer candidates than M
+        if len(candidates) <= M:
+            return [vid for vid, _ in candidates]
+
+        # Sort by distance
+        # For cosine similarity (higher = better), negate for sorting
+        # For euclidean (lower = better), sort ascending
+        if self.metric == "cosine":
+            # Higher similarity is better, so negate
+            sorted_candidates = sorted(candidates, key=lambda x: -x[1])
+        else:
+            # Lower distance is better
+            sorted_candidates = sorted(candidates, key=lambda x: x[1])
+
+        # Select top M
+        selected = sorted_candidates[:M]
+
+        # Return just the vector IDs
+        return [vid for vid, _ in selected]
 
     def delete(self, vector_id: int) -> None:
         """Delete a vector from the index."""
