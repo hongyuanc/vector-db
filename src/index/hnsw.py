@@ -199,16 +199,48 @@ class HNSWIndex(VectorIndex):
         """
         Search for k nearest neighbors.
 
+        Algorithm:
+        1. Start from entry point at top layer
+        2. Greedy search (beam=1) down to layer 1
+        3. Beam search (beam=ef) at layer 0
+        4. Return top-k results
+
         Args:
             query: Query vector
             k: Number of neighbors to return
-            ef: Search width (defaults to self.ef_search)
+            ef: Search width at layer 0 (defaults to self.ef_search)
+                Higher ef = better recall but slower search
 
         Returns:
-            List of (vector_id, distance) tuples
+            List of (vector_id, distance) tuples sorted by distance
         """
-        # TODO: Implement search
-        pass
+        # Handle empty index
+        if self.entry_point is None:
+            return []
+
+        # Use default ef_search if not provided
+        if ef is None:
+            ef = self.ef_search
+
+        # Ensure ef is at least k (can't return k results with ef < k)
+        ef = max(ef, k)
+
+        # Start from entry point
+        nearest = [self.entry_point]
+
+        # Greedy search from top layer down to layer 1
+        # This quickly navigates to the right region
+        for lc in range(self.max_layer, 0, -1):
+            candidates = self._search_layer(query, nearest, num_closest=1, layer=lc)
+            # Extract IDs for next layer
+            nearest = [c[0] for c in candidates]
+
+        # Beam search at layer 0 for precision
+        # This explores multiple paths to find the best k neighbors
+        candidates = self._search_layer(query, nearest, num_closest=ef, layer=0)
+
+        # Return top-k results
+        return candidates[:k]
 
     def _search_layer(
         self, query: np.ndarray, entry_points: List[int], num_closest: int, layer: int

@@ -443,3 +443,181 @@ class TestInsert:
         assert len(index.nodes) == 3
         for i in range(3):
             assert i in index.nodes
+
+
+class TestSearch:
+    """Test HNSW search operation."""
+
+    def test_search_empty_index(self):
+        """Test searching an empty index."""
+        index = HNSWIndex(M=16, metric="euclidean")
+        index.vectors = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
+
+        query = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        results = index.search(query, k=5)
+
+        assert results == [], "Empty index should return empty results"
+
+    def test_search_single_vector(self):
+        """Test searching with single vector in index."""
+        index = HNSWIndex(M=16, metric="euclidean")
+        index.vectors = np.array([
+            [1.0, 0.0, 0.0],
+        ], dtype=np.float32)
+
+        # Insert single vector
+        index.insert(index.vectors[0], vector_id=0)
+
+        # Search for it
+        query = np.array([0.9, 0.0, 0.0], dtype=np.float32)
+        results = index.search(query, k=1)
+
+        assert len(results) == 1
+        assert results[0][0] == 0
+
+    def test_search_finds_nearest(self):
+        """Test that search finds the nearest vector."""
+        index = HNSWIndex(M=5, ef_construction=50, metric="euclidean")
+
+        # Create vectors where v0 is clearly closest to query
+        vectors = np.array([
+            [1.0, 0.0, 0.0],  # v0 - closest to query
+            [0.0, 1.0, 0.0],  # v1
+            [0.0, 0.0, 1.0],  # v2
+            [5.0, 5.0, 5.0],  # v3 - far away
+        ], dtype=np.float32)
+
+        index.vectors = vectors
+
+        # Build index
+        for i in range(len(vectors)):
+            index.insert(vectors[i], vector_id=i)
+
+        # Query close to v0
+        query = np.array([0.9, 0.0, 0.0], dtype=np.float32)
+        results = index.search(query, k=1)
+
+        # Should find v0
+        assert len(results) == 1
+        assert results[0][0] == 0, "Should find v0 as nearest"
+
+    def test_search_returns_k_results(self):
+        """Test that search returns exactly k results."""
+        index = HNSWIndex(M=5, ef_construction=50, metric="euclidean")
+
+        # Create 10 random vectors
+        np.random.seed(42)
+        vectors = np.random.randn(10, 3).astype(np.float32)
+        index.vectors = vectors
+
+        # Build index
+        for i in range(len(vectors)):
+            index.insert(vectors[i], vector_id=i)
+
+        # Search for different k values
+        query = np.random.randn(3).astype(np.float32)
+
+        for k in [1, 3, 5, 10]:
+            results = index.search(query, k=k)
+            assert len(results) == k, f"Should return exactly {k} results"
+
+    def test_search_with_custom_ef(self):
+        """Test search with custom ef parameter."""
+        index = HNSWIndex(M=5, ef_construction=50, ef_search=10, metric="euclidean")
+
+        # Create vectors
+        np.random.seed(42)
+        vectors = np.random.randn(20, 3).astype(np.float32)
+        index.vectors = vectors
+
+        # Build index
+        for i in range(len(vectors)):
+            index.insert(vectors[i], vector_id=i)
+
+        query = np.random.randn(3).astype(np.float32)
+
+        # Search with different ef values
+        # Higher ef should explore more thoroughly
+        results_ef10 = index.search(query, k=5, ef=10)
+        results_ef50 = index.search(query, k=5, ef=50)
+
+        assert len(results_ef10) == 5
+        assert len(results_ef50) == 5
+
+    def test_search_results_sorted(self):
+        """Test that search results are sorted by distance."""
+        index = HNSWIndex(M=5, ef_construction=50, metric="euclidean")
+
+        # Create vectors
+        vectors = np.array([
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [4.0, 0.0, 0.0],
+            [5.0, 0.0, 0.0],
+        ], dtype=np.float32)
+
+        index.vectors = vectors
+
+        # Build index
+        for i in range(len(vectors)):
+            index.insert(vectors[i], vector_id=i)
+
+        # Query at origin
+        query = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        results = index.search(query, k=5)
+
+        # Results should be sorted by distance (v0 closest, v4 farthest)
+        for i in range(len(results) - 1):
+            assert results[i][1] <= results[i + 1][1], \
+                "Results should be sorted by distance (ascending)"
+
+    def test_search_cosine_metric(self):
+        """Test search with cosine similarity."""
+        index = HNSWIndex(M=5, ef_construction=50, metric="cosine")
+
+        # Create unit vectors
+        vectors = np.array([
+            [1.0, 0.0, 0.0],  # v0
+            [0.0, 1.0, 0.0],  # v1
+            [0.0, 0.0, 1.0],  # v2
+            [0.707, 0.707, 0.0],  # v3 - 45° between v0 and v1
+        ], dtype=np.float32)
+
+        index.vectors = vectors
+
+        # Build index
+        for i in range(len(vectors)):
+            index.insert(vectors[i], vector_id=i)
+
+        # Query identical to v0
+        query = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        results = index.search(query, k=1)
+
+        # Should find v0 with similarity 1.0
+        assert results[0][0] == 0, "Should find v0"
+        assert results[0][1] == pytest.approx(1.0), "Cosine similarity should be 1.0"
+
+    def test_search_large_k(self):
+        """Test searching with k larger than number of vectors."""
+        index = HNSWIndex(M=5, ef_construction=50, metric="euclidean")
+
+        # Create only 3 vectors
+        vectors = np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float32)
+
+        index.vectors = vectors
+
+        # Build index
+        for i in range(len(vectors)):
+            index.insert(vectors[i], vector_id=i)
+
+        # Search for k=10 (more than we have)
+        query = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+        results = index.search(query, k=10)
+
+        # Should return all 3 vectors
+        assert len(results) == 3, "Should return all available vectors"
