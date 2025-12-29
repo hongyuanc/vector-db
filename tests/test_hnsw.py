@@ -153,3 +153,146 @@ class TestNeighborSelection:
         selected = index._select_neighbors([], M=3)
 
         assert selected == []
+
+
+class TestLayerSearch:
+    """Test HNSW layer search algorithm."""
+
+    @pytest.fixture
+    def simple_graph_euclidean(self):
+        """
+        Create a simple HNSW graph for testing.
+
+        Graph structure at layer 0:
+        v0 [1,0,0] --- v1 [0,1,0]
+         |              |
+        v2 [0,0,1] --- v3 [1,1,0]
+        """
+        index = HNSWIndex(M=2, metric="euclidean")
+
+        # Create vectors
+        index.vectors = np.array([
+            [1.0, 0.0, 0.0],  # v0
+            [0.0, 1.0, 0.0],  # v1
+            [0.0, 0.0, 1.0],  # v2
+            [1.0, 1.0, 0.0],  # v3
+        ], dtype=np.float32)
+
+        # Create nodes with connections at layer 0
+        index.nodes[0] = HNSWNode(vector_id=0, layer=0, connections={0: {1, 2}})
+        index.nodes[1] = HNSWNode(vector_id=1, layer=0, connections={0: {0, 3}})
+        index.nodes[2] = HNSWNode(vector_id=2, layer=0, connections={0: {0, 3}})
+        index.nodes[3] = HNSWNode(vector_id=3, layer=0, connections={0: {1, 2}})
+
+        return index
+
+    @pytest.fixture
+    def simple_graph_cosine(self):
+        """Create a simple graph with cosine similarity."""
+        index = HNSWIndex(M=2, metric="cosine")
+
+        # Create unit vectors for easier cosine calculation
+        index.vectors = np.array([
+            [1.0, 0.0, 0.0],   # v0
+            [0.0, 1.0, 0.0],   # v1
+            [0.0, 0.0, 1.0],   # v2
+            [0.707, 0.707, 0.0],  # v3 - 45 degrees between v0 and v1
+        ], dtype=np.float32)
+
+        # Create nodes with connections at layer 0
+        index.nodes[0] = HNSWNode(vector_id=0, layer=0, connections={0: {1, 3}})
+        index.nodes[1] = HNSWNode(vector_id=1, layer=0, connections={0: {0, 3}})
+        index.nodes[2] = HNSWNode(vector_id=2, layer=0, connections={0: {0, 1}})
+        index.nodes[3] = HNSWNode(vector_id=3, layer=0, connections={0: {0, 1}})
+
+        return index
+
+    def test_search_layer_euclidean_single_entry(self, simple_graph_euclidean):
+        """Test layer search with single entry point."""
+        index = simple_graph_euclidean
+
+        # Query close to v0 [1,0,0]
+        query = np.array([0.9, 0.0, 0.0], dtype=np.float32)
+
+        # Start from v1, search for 2 nearest
+        results = index._search_layer(query, entry_points=[1], num_closest=2, layer=0)
+
+        # Should find v0 as closest (distance ~0.1)
+        assert len(results) >= 1
+        assert results[0][0] == 0, "v0 should be closest to query [0.9,0,0]"
+
+    def test_search_layer_euclidean_multiple_entries(self, simple_graph_euclidean):
+        """Test layer search with multiple entry points."""
+        index = simple_graph_euclidean
+
+        # Query at origin
+        query = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+        # Start from v0 and v1
+        results = index._search_layer(query, entry_points=[0, 1], num_closest=3, layer=0)
+
+        # Should find all connected nodes
+        assert len(results) >= 3
+        found_ids = {r[0] for r in results}
+        assert 0 in found_ids
+        assert 1 in found_ids
+        assert 2 in found_ids or 3 in found_ids
+
+    def test_search_layer_cosine(self, simple_graph_cosine):
+        """Test layer search with cosine similarity."""
+        index = simple_graph_cosine
+
+        # Query similar to v0 [1,0,0]
+        query = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+
+        # Start from v1
+        results = index._search_layer(query, entry_points=[1], num_closest=2, layer=0)
+
+        # Should find v0 as most similar (cosine similarity = 1.0)
+        assert len(results) >= 1
+        assert results[0][0] == 0, "v0 should be most similar to query [1,0,0]"
+        assert results[0][1] == pytest.approx(1.0), "Cosine similarity should be 1.0"
+
+    def test_search_layer_beam_width(self, simple_graph_euclidean):
+        """Test that beam width (num_closest) is respected."""
+        index = simple_graph_euclidean
+
+        query = np.array([0.5, 0.5, 0.0], dtype=np.float32)
+
+        # Search with beam width 1
+        results = index._search_layer(query, entry_points=[0], num_closest=1, layer=0)
+        assert len(results) == 1
+
+        # Search with beam width 3
+        results = index._search_layer(query, entry_points=[0], num_closest=3, layer=0)
+        assert len(results) <= 3
+
+    def test_search_layer_empty_graph(self):
+        """Test search on empty graph."""
+        index = HNSWIndex(M=2, metric="euclidean")
+        index.vectors = np.array([
+            [1.0, 0.0, 0.0],
+        ], dtype=np.float32)
+
+        query = np.array([0.5, 0.0, 0.0], dtype=np.float32)
+
+        # Entry point exists but has no connections
+        index.nodes[0] = HNSWNode(vector_id=0, layer=0, connections={})
+
+        results = index._search_layer(query, entry_points=[0], num_closest=5, layer=0)
+
+        # Should return only the entry point
+        assert len(results) == 1
+        assert results[0][0] == 0
+
+    def test_search_layer_returns_sorted_results(self, simple_graph_euclidean):
+        """Test that results are sorted by distance (closest first)."""
+        index = simple_graph_euclidean
+
+        query = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+
+        results = index._search_layer(query, entry_points=[0], num_closest=4, layer=0)
+
+        # Verify distances are in ascending order (closest first)
+        for i in range(len(results) - 1):
+            assert results[i][1] <= results[i + 1][1], "Results should be sorted by distance"

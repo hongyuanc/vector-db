@@ -13,6 +13,7 @@ Key concepts:
 """
 
 import numpy as np
+import heapq
 from typing import List, Tuple, Dict, Set
 from dataclasses import dataclass, field
 from .base import VectorIndex
@@ -143,17 +144,117 @@ class HNSWIndex(VectorIndex):
         """
         Search for nearest neighbors at a specific layer.
 
+        This is the core navigation algorithm that makes HNSW fast.
+
+        Uses beam search at layer 0 (explores multiple paths with width=num_closest)
+        and greedy search at upper layers (follows single best path with width=1).
+
+        Algorithm:
+        1. Start from entry_points
+        2. Maintain candidates heap (nodes to explore) and visited set
+        3. Explore neighbors, adding promising ones to candidates
+        4. Stop when no better candidates found
+        5. Return top num_closest results
+
         Args:
             query: Query vector
             entry_points: Starting points for search
-            num_closest: Number of closest points to return
+            num_closest: Number of closest points to return (beam width)
             layer: Layer to search
 
         Returns:
-            List of (vector_id, distance) tuples
+            List of (vector_id, distance) tuples sorted by distance
         """
-        # TODO: Implement layer search (greedy or beam search)
-        pass
+        # Track visited nodes to avoid cycles
+        visited = set(entry_points)
+
+        # Candidates heap: (distance, vector_id)
+        # Min-heap for euclidean (lower is better)
+        # For cosine (higher is better), we negate distances
+        candidates = []
+
+        # Results heap: (-distance, vector_id) - max-heap to keep best
+        # We negate distance to make it a max-heap (Python only has min-heap)
+        results = []
+
+        # Initialize with entry points
+        for ep_id in entry_points:
+            dist = self.distance_fn(query, self.vectors[ep_id])
+
+            # For cosine similarity, negate to make lower=better (for min-heap)
+            if self.metric == "cosine":
+                heap_dist = -dist  # Higher similarity -> lower heap value
+            else:
+                heap_dist = dist   # Lower distance -> lower heap value
+
+            heapq.heappush(candidates, (heap_dist, ep_id))
+            heapq.heappush(results, (-heap_dist, ep_id))  # Negate for max-heap
+
+        # Beam search loop
+        while candidates:
+            # Pop closest candidate
+            current_dist, current_id = heapq.heappop(candidates)
+
+            # Optimization: if current is farther than worst result, and we have enough results, stop
+            if len(results) >= num_closest:
+                # Get the farthest point in results (top of max-heap)
+                worst_dist = -results[0][0]  # Negate back
+                if current_dist > worst_dist:
+                    break
+
+            # Explore neighbors at this layer
+            if current_id not in self.nodes:
+                continue
+
+            node = self.nodes[current_id]
+
+            # Check if this node has connections at this layer
+            if layer not in node.connections:
+                continue
+
+            # Examine all neighbors
+            for neighbor_id in node.connections[layer]:
+                # Skip if already visited
+                if neighbor_id in visited:
+                    continue
+
+                visited.add(neighbor_id)
+
+                # Compute distance to neighbor
+                neighbor_dist = self.distance_fn(query, self.vectors[neighbor_id])
+
+                # Convert to heap distance
+                if self.metric == "cosine":
+                    heap_dist = -neighbor_dist
+                else:
+                    heap_dist = neighbor_dist
+
+                # Add to candidates for further exploration
+                heapq.heappush(candidates, (heap_dist, neighbor_id))
+
+                # Add to results
+                heapq.heappush(results, (-heap_dist, neighbor_id))
+
+                # Prune results if too many (keep only num_closest best)
+                if len(results) > num_closest:
+                    heapq.heappop(results)  # Remove worst (largest in max-heap)
+
+        # Convert results back to list of (vector_id, distance)
+        result_list = []
+        while results:
+            neg_dist, vid = heapq.heappop(results)
+            actual_dist = -neg_dist  # Convert back from heap representation
+
+            # For cosine, convert back to similarity (we negated it for heap)
+            if self.metric == "cosine":
+                actual_dist = -actual_dist
+
+            result_list.append((vid, actual_dist))
+
+        # Reverse to get closest first (we popped from max-heap)
+        result_list.reverse()
+
+        return result_list
 
     def _select_neighbors(
         self, candidates: List[Tuple[int, float]], M: int
