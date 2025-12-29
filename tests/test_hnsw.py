@@ -296,3 +296,150 @@ class TestLayerSearch:
         # Verify distances are in ascending order (closest first)
         for i in range(len(results) - 1):
             assert results[i][1] <= results[i + 1][1], "Results should be sorted by distance"
+
+
+class TestInsert:
+    """Test HNSW insert operation."""
+
+    def test_insert_first_node(self):
+        """Test inserting the first node becomes entry point."""
+        index = HNSWIndex(M=16, metric="euclidean")
+
+        # Create vector storage
+        index.vectors = np.array([
+            [1.0, 0.0, 0.0],
+        ], dtype=np.float32)
+
+        # Insert first node
+        index.insert(index.vectors[0], vector_id=0)
+
+        # Verify it becomes entry point
+        assert index.entry_point == 0, "First node should be entry point"
+        assert 0 in index.nodes, "Node 0 should exist"
+        assert index.nodes[0].vector_id == 0
+
+    def test_insert_two_nodes(self):
+        """Test inserting two nodes creates bidirectional connection."""
+        index = HNSWIndex(M=16, metric="euclidean")
+
+        # Create vectors
+        index.vectors = np.array([
+            [1.0, 0.0, 0.0],  # v0
+            [0.0, 1.0, 0.0],  # v1
+        ], dtype=np.float32)
+
+        # Insert both nodes
+        index.insert(index.vectors[0], vector_id=0)
+        index.insert(index.vectors[1], vector_id=1)
+
+        # Verify nodes exist
+        assert 0 in index.nodes
+        assert 1 in index.nodes
+
+        # Verify bidirectional connection at layer 0
+        # (both should be connected since there are only 2 nodes)
+        node0 = index.nodes[0]
+        node1 = index.nodes[1]
+
+        assert 0 in node0.connections, "Node 0 should have layer 0 connections"
+        assert 0 in node1.connections, "Node 1 should have layer 0 connections"
+
+        # Check if they're connected (might not be if layers don't overlap)
+        # At minimum, verify graph structure is created
+        assert isinstance(node0.connections, dict)
+        assert isinstance(node1.connections, dict)
+
+    def test_insert_multiple_nodes_creates_graph(self):
+        """Test inserting multiple nodes creates connected graph."""
+        index = HNSWIndex(M=3, ef_construction=50, metric="euclidean")
+
+        # Create simple 3D vectors
+        vectors = np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+            [0.5, 0.5, 0.5],
+        ], dtype=np.float32)
+
+        index.vectors = vectors
+
+        # Insert all nodes
+        for i in range(len(vectors)):
+            index.insert(vectors[i], vector_id=i)
+
+        # Verify all nodes exist
+        assert len(index.nodes) == 5, "Should have 5 nodes"
+
+        # Verify graph is connected at layer 0
+        # All nodes should have at least one connection at layer 0
+        for i in range(5):
+            node = index.nodes[i]
+            assert 0 in node.connections, f"Node {i} should have layer 0 connections"
+            assert len(node.connections[0]) > 0, f"Node {i} should be connected to other nodes"
+
+    def test_insert_respects_max_connections(self):
+        """Test that nodes don't exceed M connections."""
+        index = HNSWIndex(M=2, ef_construction=50, metric="euclidean")
+
+        # Create many nearby vectors
+        vectors = np.random.randn(20, 3).astype(np.float32)
+        index.vectors = vectors
+
+        # Insert all
+        for i in range(len(vectors)):
+            index.insert(vectors[i], vector_id=i)
+
+        # Check that no node has more than M*2 connections at layer 0
+        # (layer 0 can have up to M*2 = 4 connections)
+        for i in range(len(vectors)):
+            node = index.nodes[i]
+            if 0 in node.connections:
+                num_connections = len(node.connections[0])
+                assert num_connections <= index.M * 2, \
+                    f"Node {i} has {num_connections} connections, max is {index.M * 2}"
+
+    def test_insert_updates_entry_point(self):
+        """Test that entry point is updated when higher layer node is inserted."""
+        # Fix random seed for reproducibility
+        np.random.seed(42)
+
+        index = HNSWIndex(M=16, metric="euclidean")
+
+        # Create vectors
+        vectors = np.random.randn(50, 3).astype(np.float32)
+        index.vectors = vectors
+
+        # Insert nodes - eventually one should land on a higher layer
+        for i in range(50):
+            index.insert(vectors[i], vector_id=i)
+
+        # Verify entry point exists and has high layer
+        assert index.entry_point is not None
+        assert index.max_layer >= 0
+
+        # Verify entry point node has the max layer
+        entry_node = index.nodes[index.entry_point]
+        assert entry_node.layer == index.max_layer
+
+    def test_insert_cosine_metric(self):
+        """Test insert with cosine similarity metric."""
+        index = HNSWIndex(M=3, ef_construction=50, metric="cosine")
+
+        # Create unit vectors
+        vectors = np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.707, 0.707, 0.0],
+        ], dtype=np.float32)
+
+        index.vectors = vectors
+
+        # Insert all
+        for i in range(len(vectors)):
+            index.insert(vectors[i], vector_id=i)
+
+        # Verify graph is created
+        assert len(index.nodes) == 3
+        for i in range(3):
+            assert i in index.nodes

@@ -114,14 +114,86 @@ class HNSWIndex(VectorIndex):
         """
         Insert a vector into the HNSW graph.
 
-        Steps:
-        1. Assign layer to new node
-        2. Find nearest neighbors at each layer
-        3. Add bidirectional edges
-        4. Prune connections if needed
+        This is the core construction algorithm. For each new node:
+        1. Assign a random layer
+        2. Search from top layer down (greedy, then beam search)
+        3. Add bidirectional connections
+        4. Prune neighbors to maintain max M connections
+
+        Args:
+            vector: Vector to insert (dimension,)
+            vector_id: ID for the vector
         """
-        # TODO: Implement insertion
-        pass
+        # Assign layer for new node using exponential decay
+        node_layer = self._assign_layer()
+
+        # Create new node
+        new_node = HNSWNode(vector_id=vector_id, layer=node_layer)
+        self.nodes[vector_id] = new_node
+
+        # Handle first node - it becomes the entry point
+        if self.entry_point is None:
+            self.entry_point = vector_id
+            self.max_layer = node_layer
+            return
+
+        # Search from top layer down to node_layer+1 (greedy search, beam=1)
+        # This finds the region where the new node should be inserted
+        nearest = [self.entry_point]
+
+        for lc in range(self.max_layer, node_layer, -1):
+            # Greedy search at upper layers (num_closest=1)
+            candidates = self._search_layer(vector, nearest, num_closest=1, layer=lc)
+            # Extract just the IDs for next layer
+            nearest = [c[0] for c in candidates]
+
+        # Insert node at layers [node_layer, node_layer-1, ..., 0]
+        # At each layer, find neighbors and create bidirectional connections
+        for lc in range(node_layer, -1, -1):
+            # Beam search to find ef_construction candidates at this layer
+            candidates = self._search_layer(
+                vector, nearest, num_closest=self.ef_construction, layer=lc
+            )
+
+            # Select M neighbors (M*2 for layer 0, M for higher layers)
+            # Layer 0 gets more connections for better recall
+            M = self.M * 2 if lc == 0 else self.M
+            neighbors = self._select_neighbors(candidates, M=M)
+
+            # Add bidirectional edges between new node and selected neighbors
+            new_node.connections[lc] = set(neighbors)
+
+            for neighbor_id in neighbors:
+                neighbor_node = self.nodes[neighbor_id]
+
+                # Initialize layer connections if needed
+                if lc not in neighbor_node.connections:
+                    neighbor_node.connections[lc] = set()
+
+                # Add edge from neighbor to new node
+                neighbor_node.connections[lc].add(vector_id)
+
+                # Prune neighbor's connections if it exceeds M
+                if len(neighbor_node.connections[lc]) > M:
+                    # Recompute best M neighbors for this neighbor
+                    neighbor_candidates = []
+                    for conn_id in neighbor_node.connections[lc]:
+                        dist = self.distance_fn(
+                            self.vectors[neighbor_id], self.vectors[conn_id]
+                        )
+                        neighbor_candidates.append((conn_id, dist))
+
+                    # Select best M and update connections
+                    pruned = self._select_neighbors(neighbor_candidates, M=M)
+                    neighbor_node.connections[lc] = set(pruned)
+
+            # Update nearest for next layer (use neighbors we just connected to)
+            nearest = neighbors
+
+        # Update global entry point if new node has highest layer
+        if node_layer > self.max_layer:
+            self.max_layer = node_layer
+            self.entry_point = vector_id
 
     def search(self, query: np.ndarray, k: int, ef: int = None) -> List[Tuple[int, float]]:
         """
