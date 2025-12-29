@@ -102,13 +102,28 @@ class HNSWIndex(VectorIndex):
 
     def build(self, vectors: np.ndarray) -> None:
         """
-        Build HNSW index from scratch.
+        Build HNSW index.
+
+        This is a convenience method that stores the vectors and inserts
+        them one by one using the insert() operation. This is the most
+        common way to construct an HNSW index.
 
         Args:
             vectors: Array of vectors (n_vectors x dimension)
+                    Shape: (n_vector111s, dimension)
+
+        Example:
+            >>> index = HNSWIndex(M=16, ef_construction=200)
+            >>> vectors = np.random.randn(1000, 128).astype(np.float32)
+            >>> index.build(vectors)
+            >>> results = index.search(query_vector, k=10)
         """
-        # TODO: Implement index construction
-        pass
+        # Store vector data
+        self.vectors = vectors
+
+        # Insert each vector into the graph
+        for i in range(len(vectors)):
+            self.insert(vectors[i], vector_id=i)
 
     def insert(self, vector: np.ndarray, vector_id: int) -> None:
         """
@@ -399,16 +414,154 @@ class HNSWIndex(VectorIndex):
         return [vid for vid, _ in selected]
 
     def delete(self, vector_id: int) -> None:
-        """Delete a vector from the index."""
-        # TODO: Implement deletion
-        pass
+        """
+        Delete a vector from the HNSW index.
+
+        This removes the node and all its connections from the graph.
+        Algorithm:
+        1. Remove all edges pointing TO this node from neighbors
+        2. Remove the node itself
+        3. Handle entry point update if needed
+
+        Args:
+            vector_id: ID of vector to delete
+
+        Note:
+            - Does not modify self.vectors array (keeps indexing consistent)
+            - If deleting entry point, finds new entry point from remaining nodes
+            - Graph remains navigable after deletion
+        """
+        # Check if vector exists
+        if vector_id not in self.nodes:
+            raise ValueError(f"Vector ID {vector_id} not found in index")
+
+        # Remove all edges pointing TO this node from ALL nodes
+        # Note: We must check all nodes, not just this node's neighbors,
+        # because HNSW connections might not be perfectly symmetric due to M-limit pruning
+        for other_node in self.nodes.values():
+            for layer in other_node.connections:
+                other_node.connections[layer].discard(vector_id)
+
+        # Remove the node itself
+        del self.nodes[vector_id]
+
+        # Handle entry point update if we deleted it
+        if self.entry_point == vector_id:
+            if len(self.nodes) == 0:
+                # Index is now empty
+                self.entry_point = None
+                self.max_layer = 0
+            else:
+                # Find new entry point - pick node with highest layer
+                new_entry = max(self.nodes.values(), key=lambda n: n.layer)
+                self.entry_point = new_entry.vector_id
+                self.max_layer = new_entry.layer
 
     def save(self, filepath: str) -> None:
-        """Save index to disk."""
-        # TODO: Implement save
-        pass
+        """
+        Save HNSW index to disk.
+
+        Serializes the entire index state including:
+        - Graph structure (nodes and connections)
+        - Index parameters (M, ef_construction, ef_search, ml, metric)
+        - Entry point and layer information
+        - Vector data
+
+        Args:
+            filepath: Path to save the index (.npz file)
+
+        Example:
+            >>> index.save("my_index.npz")
+            >>> new_index = HNSWIndex()
+            >>> new_index.load("my_index.npz")
+        """
+        import pickle
+
+        # Serialize graph structure using pickle
+        # We need to convert the nodes dict to a serializable format
+        nodes_data = {}
+        for vid, node in self.nodes.items():
+            # Convert sets to lists for serialization
+            connections_serializable = {
+                layer: list(neighbors) for layer, neighbors in node.connections.items()
+            }
+            nodes_data[vid] = {
+                'vector_id': node.vector_id,
+                'layer': node.layer,
+                'connections': connections_serializable
+            }
+
+        # Save everything to .npz file
+        np.savez(
+            filepath,
+            # Graph structure
+            nodes=pickle.dumps(nodes_data),
+            entry_point=self.entry_point if self.entry_point is not None else -1,
+            max_layer=self.max_layer,
+            # Parameters
+            M=self.M,
+            ef_construction=self.ef_construction,
+            ef_search=self.ef_search,
+            ml=self.ml,
+            metric=self.metric,
+            # Vector data
+            vectors=self.vectors if self.vectors is not None else np.array([]),
+        )
 
     def load(self, filepath: str) -> None:
-        """Load index from disk."""
-        # TODO: Implement load
-        pass
+        """
+        Load HNSW index from disk.
+
+        Restores the complete index state from a saved file.
+        This completely replaces the current index state.
+
+        Args:
+            filepath: Path to the saved index (.npz file)
+
+        Example:
+            >>> index = HNSWIndex()
+            >>> index.load("my_index.npz")
+            >>> results = index.search(query, k=10)
+        """
+        import pickle
+
+        # Load data from .npz file
+        data = np.load(filepath, allow_pickle=True)
+
+        # Restore parameters
+        self.M = int(data['M'])
+        self.ef_construction = int(data['ef_construction'])
+        self.ef_search = int(data['ef_search'])
+        self.ml = float(data['ml'])
+        self.metric = str(data['metric'])
+
+        # Restore distance function based on metric
+        if self.metric == "euclidean":
+            self.distance_fn = euclidean_distance
+        else:  # cosine
+            self.distance_fn = cosine_similarity
+
+        # Restore entry point and max layer
+        entry_point_val = int(data['entry_point'])
+        self.entry_point = entry_point_val if entry_point_val != -1 else None
+        self.max_layer = int(data['max_layer'])
+
+        # Restore vectors
+        vectors_data = data['vectors']
+        self.vectors = vectors_data if len(vectors_data) > 0 else None
+
+        # Restore graph structure
+        nodes_data = pickle.loads(data['nodes'].tobytes())
+        self.nodes = {}
+        for vid, node_dict in nodes_data.items():
+            # Convert lists back to sets
+            connections = {
+                layer: set(neighbors)
+                for layer, neighbors in node_dict['connections'].items()
+            }
+            node = HNSWNode(
+                vector_id=node_dict['vector_id'],
+                layer=node_dict['layer'],
+                connections=connections
+            )
+            self.nodes[vid] = node

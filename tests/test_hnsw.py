@@ -4,6 +4,8 @@ Tests for HNSW index implementation.
 
 import pytest
 import numpy as np
+import tempfile
+from pathlib import Path
 from src.index.hnsw import HNSWIndex, HNSWNode
 
 
@@ -621,3 +623,454 @@ class TestSearch:
 
         # Should return all 3 vectors
         assert len(results) == 3, "Should return all available vectors"
+
+
+class TestBuild:
+    """Test HNSW build operation."""
+
+    def test_build_simple(self):
+        """Test building index with a few vectors."""
+        index = HNSWIndex(M=5, ef_construction=50, metric="euclidean")
+
+        # Create simple vectors
+        vectors = np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+            [0.5, 0.5, 0.5],
+        ], dtype=np.float32)
+
+        # Build index
+        index.build(vectors)
+
+        # Verify vectors are stored
+        assert index.vectors is not None
+        assert len(index.vectors) == 5
+
+        # Verify all nodes were created
+        assert len(index.nodes) == 5
+        for i in range(5):
+            assert i in index.nodes
+
+        # Verify entry point was set
+        assert index.entry_point is not None
+
+    def test_build_and_search(self):
+        """Test that build creates a searchable index."""
+        index = HNSWIndex(M=5, ef_construction=50, metric="euclidean")
+
+        # Create vectors
+        np.random.seed(42)
+        vectors = np.random.randn(20, 3).astype(np.float32)
+
+        # Build index
+        index.build(vectors)
+
+        # Search should work
+        query = np.random.randn(3).astype(np.float32)
+        results = index.search(query, k=5)
+
+        assert len(results) == 5
+        # Results should be sorted by distance
+        for i in range(len(results) - 1):
+            assert results[i][1] <= results[i + 1][1]
+
+    def test_build_creates_connected_graph(self):
+        """Test that build creates a connected graph."""
+        index = HNSWIndex(M=3, ef_construction=50, metric="euclidean")
+
+        # Create random vectors
+        np.random.seed(42)
+        vectors = np.random.randn(15, 3).astype(np.float32)
+
+        # Build index
+        index.build(vectors)
+
+        # All nodes should be connected at layer 0
+        for i in range(len(vectors)):
+            node = index.nodes[i]
+            assert 0 in node.connections, f"Node {i} should have layer 0 connections"
+            assert len(node.connections[0]) > 0, f"Node {i} should be connected"
+
+    def test_build_with_cosine_metric(self):
+        """Test build with cosine similarity metric."""
+        index = HNSWIndex(M=5, ef_construction=50, metric="cosine")
+
+        # Create unit vectors
+        vectors = np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.707, 0.707, 0.0],
+            [0.577, 0.577, 0.577],
+        ], dtype=np.float32)
+
+        # Build
+        index.build(vectors)
+
+        # Search for exact match
+        query = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        results = index.search(query, k=1)
+
+        # Should find v0 with similarity 1.0
+        assert results[0][0] == 0
+        assert results[0][1] == pytest.approx(1.0)
+
+    def test_build_empty_array(self):
+        """Test building with empty array."""
+        index = HNSWIndex(M=5, metric="euclidean")
+
+        vectors = np.array([], dtype=np.float32).reshape(0, 3)
+
+        # Build with empty array
+        index.build(vectors)
+
+        # Should have no nodes
+        assert len(index.nodes) == 0
+        assert index.entry_point is None
+
+        # Search should return empty
+        query = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        results = index.search(query, k=5)
+        assert results == []
+
+    def test_build_large_index(self):
+        """Test building a larger index."""
+        index = HNSWIndex(M=16, ef_construction=100, metric="euclidean")
+
+        # Create 100 random vectors
+        np.random.seed(42)
+        vectors = np.random.randn(100, 10).astype(np.float32)
+
+        # Build
+        index.build(vectors)
+
+        # Verify size
+        assert len(index.nodes) == 100
+        assert index.vectors.shape == (100, 10)
+
+        # Test search works
+        query = np.random.randn(10).astype(np.float32)
+        results = index.search(query, k=10)
+
+        assert len(results) == 10
+
+    def test_build_respects_construction_parameters(self):
+        """Test that build uses ef_construction and M correctly."""
+        # Low M means fewer connections
+        index_low_m = HNSWIndex(M=2, ef_construction=20, metric="euclidean")
+
+        np.random.seed(42)
+        vectors = np.random.randn(20, 3).astype(np.float32)
+
+        index_low_m.build(vectors)
+
+        # Check that connections are limited by M
+        for i in range(20):
+            node = index_low_m.nodes[i]
+            if 0 in node.connections:
+                # Layer 0 can have M*2 connections
+                assert len(node.connections[0]) <= index_low_m.M * 2
+
+
+class TestDelete:
+    """Test HNSW delete operation."""
+
+    def test_delete_single_vector(self):
+        """Test deleting a single vector from index."""
+        index = HNSWIndex(M=4, ef_construction=20, metric="euclidean")
+
+        # Build small index
+        vectors = np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float32)
+
+        index.build(vectors)
+        assert len(index.nodes) == 3, "Should have 3 nodes before deletion"
+
+        # Delete middle vector
+        index.delete(1)
+
+        assert len(index.nodes) == 2, "Should have 2 nodes after deletion"
+        assert 1 not in index.nodes, "Deleted node should not exist"
+        assert 0 in index.nodes, "Other nodes should remain"
+        assert 2 in index.nodes, "Other nodes should remain"
+
+    def test_delete_removes_connections(self):
+        """Test that deleting a vector removes all connections to it."""
+        index = HNSWIndex(M=4, ef_construction=20, metric="euclidean")
+
+        # Build index
+        np.random.seed(42)
+        vectors = np.random.randn(10, 3).astype(np.float32)
+        index.build(vectors)
+
+        # Note which nodes were connected to node 5
+        node_5 = index.nodes[5]
+        connected_to_5 = set()
+        for layer in node_5.connections:
+            connected_to_5.update(node_5.connections[layer])
+
+        # Delete node 5
+        index.delete(5)
+
+        # Verify no node has connections to node 5 anymore
+        for vid, node in index.nodes.items():
+            for layer in node.connections:
+                assert 5 not in node.connections[layer], \
+                    f"Node {vid} at layer {layer} should not connect to deleted node 5"
+
+    def test_delete_entry_point(self):
+        """Test deleting the entry point updates it correctly."""
+        index = HNSWIndex(M=4, ef_construction=20, metric="euclidean")
+
+        # Build index
+        vectors = np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float32)
+        index.build(vectors)
+
+        old_entry = index.entry_point
+
+        # Delete entry point
+        index.delete(old_entry)
+
+        # Should have a new entry point
+        assert index.entry_point is not None, "Should have new entry point"
+        assert index.entry_point != old_entry, "Entry point should change"
+        assert index.entry_point in index.nodes, "New entry point should exist"
+
+    def test_delete_all_vectors(self):
+        """Test deleting all vectors leaves empty index."""
+        index = HNSWIndex(M=4, ef_construction=20, metric="euclidean")
+
+        # Build index
+        vectors = np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ], dtype=np.float32)
+        index.build(vectors)
+
+        # Delete all
+        index.delete(0)
+        index.delete(1)
+
+        assert len(index.nodes) == 0, "Should have no nodes"
+        assert index.entry_point is None, "Entry point should be None"
+        assert index.max_layer == 0, "Max layer should be 0"
+
+    def test_delete_nonexistent_vector(self):
+        """Test that deleting non-existent vector raises error."""
+        index = HNSWIndex(M=4, ef_construction=20, metric="euclidean")
+
+        vectors = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
+        index.build(vectors)
+
+        with pytest.raises(ValueError, match="not found"):
+            index.delete(999)
+
+    def test_search_after_delete(self):
+        """Test that search still works after deleting vectors."""
+        index = HNSWIndex(M=4, ef_construction=20, metric="euclidean")
+
+        # Build index
+        np.random.seed(42)
+        vectors = np.random.randn(20, 3).astype(np.float32)
+        index.build(vectors)
+
+        # Delete some vectors
+        index.delete(5)
+        index.delete(10)
+        index.delete(15)
+
+        # Search should still work
+        query = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        results = index.search(query, k=5)
+
+        assert len(results) == 5, "Should return 5 results"
+        # Deleted vectors should not appear in results
+        result_ids = [vid for vid, _ in results]
+        assert 5 not in result_ids, "Deleted vector should not appear"
+        assert 10 not in result_ids, "Deleted vector should not appear"
+        assert 15 not in result_ids, "Deleted vector should not appear"
+
+
+class TestSaveLoad:
+    """Test HNSW save and load operations."""
+
+    def test_save_and_load_simple(self):
+        """Test basic save and load functionality."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = Path(tmpdir) / "index.npz"
+
+            # Create and build index
+            index1 = HNSWIndex(M=8, ef_construction=50, ef_search=30, metric="euclidean")
+            vectors = np.array([
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 1.0, 0.0],
+                [1.0, 0.0, 1.0],
+            ], dtype=np.float32)
+            index1.build(vectors)
+
+            # Save
+            index1.save(str(filepath))
+
+            # Load in new index
+            index2 = HNSWIndex()
+            index2.load(str(filepath))
+
+            # Verify parameters restored
+            assert index2.M == 8, "M should be restored"
+            assert index2.ef_construction == 50, "ef_construction should be restored"
+            assert index2.ef_search == 30, "ef_search should be restored"
+            assert index2.metric == "euclidean", "metric should be restored"
+
+            # Verify graph structure restored
+            assert len(index2.nodes) == 5, "Should have 5 nodes"
+            assert index2.entry_point is not None, "Entry point should be restored"
+
+    def test_save_load_preserves_search_results(self):
+        """Test that search results are identical after save/load."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = Path(tmpdir) / "index.npz"
+
+            # Create and build index
+            index1 = HNSWIndex(M=16, ef_construction=200, metric="euclidean")
+            np.random.seed(42)
+            vectors = np.random.randn(50, 128).astype(np.float32)
+            index1.build(vectors)
+
+            # Perform search before save
+            query = np.random.randn(128).astype(np.float32)
+            results1 = index1.search(query, k=10)
+
+            # Save and load
+            index1.save(str(filepath))
+            index2 = HNSWIndex()
+            index2.load(str(filepath))
+
+            # Perform same search after load
+            results2 = index2.search(query, k=10)
+
+            # Results should be identical
+            assert len(results1) == len(results2), "Should return same number of results"
+            for (vid1, dist1), (vid2, dist2) in zip(results1, results2):
+                assert vid1 == vid2, f"Result IDs should match: {vid1} vs {vid2}"
+                assert abs(dist1 - dist2) < 1e-6, f"Distances should match: {dist1} vs {dist2}"
+
+    def test_save_load_with_cosine_metric(self):
+        """Test save/load with cosine similarity metric."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = Path(tmpdir) / "index.npz"
+
+            # Create index with cosine metric
+            index1 = HNSWIndex(M=8, ef_construction=50, metric="cosine")
+            vectors = np.random.randn(20, 64).astype(np.float32)
+            index1.build(vectors)
+
+            # Save and load
+            index1.save(str(filepath))
+            index2 = HNSWIndex()
+            index2.load(str(filepath))
+
+            # Verify metric restored
+            assert index2.metric == "cosine", "Metric should be cosine"
+
+            # Verify distance function is correct
+            query = np.random.randn(64).astype(np.float32)
+            results = index2.search(query, k=5)
+
+            # Cosine similarity should be in [0, 1] range (or [-1, 1] for negative)
+            for vid, dist in results:
+                assert -1.0 <= dist <= 1.0, f"Cosine similarity should be in [-1, 1], got {dist}"
+
+    def test_save_load_empty_index(self):
+        """Test saving and loading an empty index."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = Path(tmpdir) / "index.npz"
+
+            # Create empty index
+            index1 = HNSWIndex(M=8, ef_construction=50, metric="euclidean")
+
+            # Save
+            index1.save(str(filepath))
+
+            # Load
+            index2 = HNSWIndex()
+            index2.load(str(filepath))
+
+            # Verify empty state
+            assert len(index2.nodes) == 0, "Should have no nodes"
+            assert index2.entry_point is None, "Entry point should be None"
+            assert index2.vectors is None, "Vectors should be None"
+
+    def test_save_load_graph_structure(self):
+        """Test that graph structure (connections) is preserved."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = Path(tmpdir) / "index.npz"
+
+            # Create index
+            index1 = HNSWIndex(M=4, ef_construction=20, metric="euclidean")
+            vectors = np.random.randn(10, 3).astype(np.float32)
+            index1.build(vectors)
+
+            # Record graph structure
+            original_structure = {}
+            for vid, node in index1.nodes.items():
+                original_structure[vid] = {
+                    'layer': node.layer,
+                    'connections': {
+                        layer: set(neighbors) for layer, neighbors in node.connections.items()
+                    }
+                }
+
+            # Save and load
+            index1.save(str(filepath))
+            index2 = HNSWIndex()
+            index2.load(str(filepath))
+
+            # Verify structure matches
+            assert len(index2.nodes) == len(original_structure), "Node count should match"
+
+            for vid, node in index2.nodes.items():
+                assert vid in original_structure, f"Node {vid} should exist in original"
+                orig = original_structure[vid]
+
+                assert node.layer == orig['layer'], f"Layer should match for node {vid}"
+                assert node.connections.keys() == orig['connections'].keys(), \
+                    f"Layers should match for node {vid}"
+
+                for layer in node.connections:
+                    assert node.connections[layer] == orig['connections'][layer], \
+                        f"Connections at layer {layer} should match for node {vid}"
+
+    def test_load_overwrites_existing_index(self):
+        """Test that loading overwrites existing index state."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = Path(tmpdir) / "index.npz"
+
+            # Create first index and save
+            index1 = HNSWIndex(M=8, ef_construction=50, metric="euclidean")
+            vectors1 = np.random.randn(10, 3).astype(np.float32)
+            index1.build(vectors1)
+            index1.save(str(filepath))
+
+            # Create second index with different data
+            index2 = HNSWIndex(M=16, ef_construction=100, metric="cosine")
+            vectors2 = np.random.randn(20, 3).astype(np.float32)
+            index2.build(vectors2)
+
+            # Load first index into second (should overwrite)
+            index2.load(str(filepath))
+
+            # Verify it now matches first index
+            assert index2.M == 8, "M should be from loaded index"
+            assert index2.metric == "euclidean", "Metric should be from loaded index"
+            assert len(index2.nodes) == 10, "Should have 10 nodes from loaded index"
