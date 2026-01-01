@@ -12,9 +12,11 @@ This project implements state-of-the-art approximate nearest neighbor (ANN) sear
 - **High Performance**: Sub-10ms p99 latency for k-NN queries on millions of vectors
 - **Scalability**: Architected to support 1M+ vectors initially, billions at scale
 - **Multiple Distance Metrics**: Cosine similarity, Euclidean distance, and dot product
-- **Hybrid Search**: Vector similarity combined with metadata filtering
-- **Production-Ready**: Write-ahead logging, crash recovery, and durability guarantees
+- **Hybrid Search**: Vector similarity combined with metadata filtering (SQLite-backed)
+- **Complete CRUD**: Insert, search, update, and delete operations with lazy deletion
+- **Metadata Storage**: Rich metadata support with JSON fields and filtering
 - **REST API**: FastAPI-based REST endpoints for all operations
+- **Docker Deployment**: Production-ready containerized deployment
 
 ## Target Specifications
 
@@ -80,10 +82,34 @@ print(f"Found {len(results)} nearest neighbors")
 
 ## API Usage
 
-Start the API server:
+### Using Docker (Recommended)
 
 ```bash
-uvicorn src.api.server:app --reload
+# Build and start the server
+docker-compose up -d
+
+# Check logs
+docker-compose logs -f
+
+# Stop the server
+docker-compose down
+```
+
+### Using Python directly
+
+```bash
+./venv/bin/python -m uvicorn src.api.server:app --host 0.0.0.0 --port 8000
+
+# Or with auto-reload for development
+./venv/bin/python -m uvicorn src.api.server:app --reload
+```
+
+Visit [http://localhost:8000/docs](http://localhost:8000/docs) for interactive API documentation.
+
+### Create a collection
+
+```bash
+curl -X POST "http://localhost:8000/collections/create?dimension=128"
 ```
 
 ### Insert vectors
@@ -97,17 +123,38 @@ curl -X POST "http://localhost:8000/insert" \
   }'
 ```
 
+### Build the index
+
+```bash
+curl -X POST "http://localhost:8000/collections/default/build_index"
+```
+
 ### Search vectors
 
 ```bash
+# Basic search
 curl -X POST "http://localhost:8000/search" \
   -H "Content-Type: application/json" \
   -d '{
     "vector": [0.1, 0.2, 0.3, ...],
     "k": 10,
-    "ef": 50,
+    "ef": 50
+  }'
+
+# Search with metadata filtering
+curl -X POST "http://localhost:8000/search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "vector": [0.1, 0.2, 0.3, ...],
+    "k": 10,
     "filter": {"category": "electronics"}
   }'
+```
+
+### Delete a vector
+
+```bash
+curl -X DELETE "http://localhost:8000/vector/123"
 ```
 
 ## Architecture
@@ -182,6 +229,16 @@ ruff check src/ tests/
 mypy src/
 ```
 
+## Demo
+
+Try the interactive movie search demo:
+
+```bash
+python demo/movie_search.py
+```
+
+Features semantic search with metadata filtering on a sample movie dataset. See [demo/README.md](demo/README.md) for details.
+
 ## Performance & Benchmarks
 
 **Verified on SIFT1M** (industry-standard benchmark):
@@ -234,9 +291,9 @@ See `tests/benchmarks/README.md` for detailed documentation.
 - [x] **Phase 1**: Foundation (vector storage, distance metrics, brute-force search)
 - [x] **Phase 2**: HNSW Implementation (core algorithm, graph construction, search)
 - [x] **Phase 3**: Benchmarking (SIFT1M validation, parameter tuning, performance analysis)
-- [ ] **Phase 4**: API Layer (FastAPI endpoints, collection management, persistence)
-- [ ] **Phase 5**: Production Features (WAL, metadata filtering, crash recovery)
-- [ ] **Phase 6**: Optimization (multi-threading, SIMD, build performance)
+- [x] **Phase 4**: API Layer (FastAPI endpoints, collection management, persistence)
+- [x] **Phase 5**: Production Features (metadata filtering, CRUD operations, Docker deployment, demo)
+- [ ] **Phase 6**: Advanced Features (WAL, metrics, multi-threading optimization)
 
 ## Contributing
 
