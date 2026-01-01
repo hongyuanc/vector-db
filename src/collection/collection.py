@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 
 from ..storage.vector_store import VectorStore
+from ..storage.metadata_store import MetadataStore
 from ..index.hnsw import HNSWIndex
 
 
@@ -66,6 +67,10 @@ class Collection:
             data_dir=str(self.data_dir)
         )
 
+        # Initialize metadata store
+        metadata_db_path = self.data_dir / "metadata.db"
+        self.metadata_store = MetadataStore(str(metadata_db_path))
+
         # Initialize HNSW index
         self.index = HNSWIndex(
             M=M,
@@ -102,7 +107,7 @@ class Collection:
 
         Args:
             vector: Vector to insert (1D array)
-            metadata: Optional metadata (currently not used)
+            metadata: Optional metadata
 
         Returns:
             Vector ID
@@ -113,6 +118,10 @@ class Collection:
 
         # Insert into store
         vector_id = self.store.insert(vector)
+
+        # Store metadata
+        if metadata is not None:
+            self.metadata_store.insert(vector_id, metadata)
 
         # Add to index
         if not self._index_built:
@@ -140,10 +149,17 @@ class Collection:
         if vectors.shape[1] != self.dimension:
             raise ValueError(f"Vector dimension {vectors.shape[1]} != {self.dimension}")
 
+        if metadata is not None and len(metadata) != len(vectors):
+            raise ValueError(f"Metadata length {len(metadata)} != vectors length {len(vectors)}")
+
         vector_ids = []
-        for vector in vectors:
+        for i, vector in enumerate(vectors):
             vector_id = self.store.insert(vector)
             vector_ids.append(vector_id)
+
+            # Store metadata if provided
+            if metadata is not None:
+                self.metadata_store.insert(vector_id, metadata[i])
 
         # Mark index as needing rebuild
         self._index_built = False
@@ -172,16 +188,16 @@ class Collection:
         filter: Optional[Dict[str, Any]] = None
     ) -> List[Tuple[int, float]]:
         """
-        Search for k nearest neighbors.
+        Search for k nearest neighbors with optional metadata filtering.
 
         Args:
             query: Query vector (1D array)
             k: Number of neighbors to return
             ef: Search width (overrides default ef_search)
-            filter: Metadata filter (not yet implemented)
+            filter: Metadata filter (dictionary of field -> value conditions)
 
         Returns:
-            List of (vector_id, distance) tuples
+            List of (vector_id, distance) tuples with metadata
         """
         if len(query) != self.dimension:
             raise ValueError(f"Query dimension {len(query)} != {self.dimension}")
@@ -193,12 +209,56 @@ class Collection:
             else:
                 return []
 
-        # Search using HNSW
-        results = self.index.search(query, k=k, ef=ef)
+        # Apply metadata filtering strategy
+        if filter:
+            # Strategy 1: Post-filtering
+            # Search for more candidates, then filter by metadata
+            search_k = k * 10  # Over-fetch to account for filtering
 
-        # TODO: Apply metadata filter if provided
+            # Search using HNSW
+            candidates = self.index.search(query, k=search_k, ef=ef)
 
-        return results
+            # Filter by metadata conditions
+            filtered_results = []
+            for vector_id, distance in candidates:
+                # Check if vector matches filter
+                if not self.metadata_store.is_deleted(vector_id):
+                    metadata = self.metadata_store.get(vector_id)
+                    if metadata and self._matches_filter(metadata, filter):
+                        filtered_results.append((vector_id, distance))
+
+                # Stop when we have enough results
+                if len(filtered_results) >= k:
+                    break
+
+            return filtered_results[:k]
+        else:
+            # No filter - regular search
+            results = self.index.search(query, k=k, ef=ef)
+
+            # Filter out deleted vectors
+            active_results = []
+            for vector_id, distance in results:
+                if not self.metadata_store.is_deleted(vector_id):
+                    active_results.append((vector_id, distance))
+
+            return active_results
+
+    def _matches_filter(self, metadata: Dict[str, Any], filter: Dict[str, Any]) -> bool:
+        """
+        Check if metadata matches filter conditions.
+
+        Args:
+            metadata: Vector metadata
+            filter: Filter conditions
+
+        Returns:
+            True if metadata matches all filter conditions
+        """
+        for key, value in filter.items():
+            if key not in metadata or metadata[key] != value:
+                return False
+        return True
 
     def save(self):
         """Save collection state to disk."""
@@ -228,9 +288,23 @@ class Collection:
         # VectorStore auto-saves on insert, but let's close it properly
         self.store.close()
 
+    def delete(self, vector_id: int):
+        """
+        Delete a vector (lazy deletion).
+
+        Args:
+            vector_id: ID of the vector to delete
+        """
+        # Mark as deleted in metadata store
+        self.metadata_store.delete(vector_id)
+
+        # Note: Vector remains in VectorStore and HNSW index
+        # Deleted vectors are filtered out during search
+
     def close(self):
         """Close the collection and save state."""
         self.save()
+        self.metadata_store.close()
 
     @property
     def count(self) -> int:

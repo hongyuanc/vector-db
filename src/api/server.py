@@ -120,12 +120,14 @@ async def search_vectors(request: SearchRequest):
             filter=request.filter
         )
 
-        # Convert to response format
+        # Convert to response format with metadata
         from .models import SearchResult
-        search_results = [
-            SearchResult(id=vid, score=score, metadata=None)
-            for vid, score in results
-        ]
+        search_results = []
+        for vid, score in results:
+            metadata = collection.metadata_store.get(vid)
+            search_results.append(
+                SearchResult(id=vid, score=score, metadata=metadata)
+            )
 
         latency_ms = (time.time() - start_time) * 1000
 
@@ -168,7 +170,7 @@ async def batch_insert_vectors(request: BatchInsertRequest):
 @app.delete("/vector/{vector_id}", response_model=DeleteResponse)
 async def delete_vector(vector_id: int):
     """
-    Delete a vector by ID.
+    Delete a vector by ID (lazy deletion).
 
     Args:
         vector_id: ID of the vector to delete
@@ -176,8 +178,13 @@ async def delete_vector(vector_id: int):
     Returns:
         Delete response
     """
-    # TODO: Implement delete logic (not yet supported in VectorStore/HNSW)
-    raise HTTPException(status_code=501, detail="Delete operation not yet implemented")
+    collection = get_default_collection()
+
+    try:
+        collection.delete(vector_id)
+        return DeleteResponse(success=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
 
 
 @app.post("/collections/create")
