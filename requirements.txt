@@ -27,3 +27,9 @@ seaborn>=0.13.0
 
 # HTTP client for testing
 httpx>=0.25.0
+
+# Demo dependencies
+sentence-transformers>=2.2.0
+rich>=13.7.0
+tqdm>=4.66.0
+python-dotenv>=1.0.0
