@@ -1,7 +1,20 @@
-from setuptools import setup, find_packages
+from setuptools import setup, find_packages, Extension
+from Cython.Build import cythonize
+import numpy as np
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
+
+# Define Cython extensions for performance-critical modules
+extensions = [
+    Extension(
+        "src.utils.distance_cy",
+        ["src/utils/distance_cy.pyx"],
+        include_dirs=[np.get_include()],
+        extra_compile_args=["-O3", "-march=native"],
+        extra_link_args=["-O3"],
+    ),
+]
 
 setup(
     name="vector-db",
@@ -12,6 +25,17 @@ setup(
     long_description_content_type="text/markdown",
     url="https://github.com/yourusername/vector-db",
     packages=find_packages(),
+    ext_modules=cythonize(
+        extensions,
+        compiler_directives={
+            "language_level": "3",
+            "boundscheck": False,  # Disable bounds checking for speed
+            "wraparound": False,   # Disable negative indexing for speed
+            "cdivision": True,     # Use C division semantics
+            "initializedcheck": False,  # Disable memoryview initialization check
+        },
+        annotate=True,  # Generate HTML annotation files for optimization analysis
+    ),
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",

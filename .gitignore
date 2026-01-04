@@ -6,6 +6,11 @@ __pycache__/
 # C extensions
 *.so
 
+# Cython build artifacts
+*.c
+*.cpp
+*.html
+
 # Distribution / packaging
 .Python
 build/
