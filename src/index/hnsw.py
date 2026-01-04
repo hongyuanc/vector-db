@@ -122,8 +122,16 @@ class HNSWIndex(VectorIndex):
         self.vectors = vectors
 
         # Insert each vector into the graph
-        for i in range(len(vectors)):
+        total = len(vectors)
+        log_interval = max(1, total // 20)  # Log 20 times during build
+
+        for i in range(total):
             self.insert(vectors[i], vector_id=i)
+
+            # Progress logging
+            if (i + 1) % log_interval == 0 or (i + 1) == total:
+                progress = (i + 1) / total * 100
+                print(f"Progress: {i+1:,}/{total:,} vectors ({progress:.1f}%)", flush=True)
 
     def insert(self, vector: np.ndarray, vector_id: int) -> None:
         """
