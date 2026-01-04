@@ -113,71 +113,110 @@ cdef inline double c_dot_product(
     return result
 
 
-# Python-accessible wrapper functions
-def euclidean_distance(
-    cnp.ndarray[cnp.float64_t, ndim=1] a,
-    cnp.ndarray[cnp.float64_t, ndim=1] b
-) -> float:
+# Python-accessible wrapper functions that handle both float32 and float64
+def euclidean_distance(cnp.ndarray a, cnp.ndarray b) -> float:
     """
     Compute Euclidean (L2) distance between two vectors.
+
+    Supports both float32 and float64 arrays with automatic conversion.
 
     Formula: sqrt(Σ(A_i - B_i)²)
 
     Args:
-        a: First vector (numpy array, float64)
-        b: Second vector (numpy array, float64)
+        a: First vector (numpy array, float32 or float64)
+        b: Second vector (numpy array, float32 or float64)
 
     Returns:
         Euclidean distance (0 = identical, larger = more different)
     """
-    cdef int n = a.shape[0]
-    cdef double[::1] a_view = a
-    cdef double[::1] b_view = b
+    # Convert to float64 if needed for precision
+    cdef cnp.ndarray[cnp.float64_t, ndim=1] a_f64
+    cdef cnp.ndarray[cnp.float64_t, ndim=1] b_f64
+
+    if a.dtype != np.float64:
+        a_f64 = a.astype(np.float64)
+    else:
+        a_f64 = a
+
+    if b.dtype != np.float64:
+        b_f64 = b.astype(np.float64)
+    else:
+        b_f64 = b
+
+    cdef int n = a_f64.shape[0]
+    cdef double[::1] a_view = a_f64
+    cdef double[::1] b_view = b_f64
 
     return c_euclidean_distance(a_view, b_view, n)
 
 
-def cosine_similarity(
-    cnp.ndarray[cnp.float64_t, ndim=1] a,
-    cnp.ndarray[cnp.float64_t, ndim=1] b
-) -> float:
+def cosine_similarity(cnp.ndarray a, cnp.ndarray b) -> float:
     """
     Compute cosine similarity between two vectors.
+
+    Supports both float32 and float64 arrays with automatic conversion.
 
     Formula: (A·B)/(||A||·||B||)
 
     Args:
-        a: First vector (numpy array, float64)
-        b: Second vector (numpy array, float64)
+        a: First vector (numpy array, float32 or float64)
+        b: Second vector (numpy array, float32 or float64)
 
     Returns:
         Cosine similarity (0 = orthogonal, 1 = identical, -1 = opposite)
     """
-    cdef int n = a.shape[0]
-    cdef double[::1] a_view = a
-    cdef double[::1] b_view = b
+    # Convert to float64 if needed for precision
+    cdef cnp.ndarray[cnp.float64_t, ndim=1] a_f64
+    cdef cnp.ndarray[cnp.float64_t, ndim=1] b_f64
+
+    if a.dtype != np.float64:
+        a_f64 = a.astype(np.float64)
+    else:
+        a_f64 = a
+
+    if b.dtype != np.float64:
+        b_f64 = b.astype(np.float64)
+    else:
+        b_f64 = b
+
+    cdef int n = a_f64.shape[0]
+    cdef double[::1] a_view = a_f64
+    cdef double[::1] b_view = b_f64
 
     return c_cosine_similarity(a_view, b_view, n)
 
 
-def dot_product(
-    cnp.ndarray[cnp.float64_t, ndim=1] a,
-    cnp.ndarray[cnp.float64_t, ndim=1] b
-) -> float:
+def dot_product(cnp.ndarray a, cnp.ndarray b) -> float:
     """
     Compute dot product between two vectors.
+
+    Supports both float32 and float64 arrays with automatic conversion.
 
     Formula: A·B = Σ(a[i] × b[i])
 
     Args:
-        a: First vector (numpy array, float64)
-        b: Second vector (numpy array, float64)
+        a: First vector (numpy array, float32 or float64)
+        b: Second vector (numpy array, float32 or float64)
 
     Returns:
         Dot product (higher = more similar for normalized vectors)
     """
-    cdef int n = a.shape[0]
-    cdef double[::1] a_view = a
-    cdef double[::1] b_view = b
+    # Convert to float64 if needed for precision
+    cdef cnp.ndarray[cnp.float64_t, ndim=1] a_f64
+    cdef cnp.ndarray[cnp.float64_t, ndim=1] b_f64
+
+    if a.dtype != np.float64:
+        a_f64 = a.astype(np.float64)
+    else:
+        a_f64 = a
+
+    if b.dtype != np.float64:
+        b_f64 = b.astype(np.float64)
+    else:
+        b_f64 = b
+
+    cdef int n = a_f64.shape[0]
+    cdef double[::1] a_view = a_f64
+    cdef double[::1] b_view = b_f64
 
     return c_dot_product(a_view, b_view, n)

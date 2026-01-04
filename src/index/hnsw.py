@@ -17,7 +17,22 @@ import heapq
 from typing import List, Tuple, Dict, Set
 from dataclasses import dataclass, field
 from .base import VectorIndex
-from ..utils.distance import euclidean_distance, cosine_similarity
+
+# Import Cython-optimized distance functions for performance
+try:
+    from ..utils.distance_cy import euclidean_distance, cosine_similarity
+    from . import hnsw_core
+    CYTHON_AVAILABLE = True
+except ImportError:
+    # Fallback to Numba if Cython not compiled
+    from ..utils.distance import euclidean_distance, cosine_similarity
+    hnsw_core = None
+    CYTHON_AVAILABLE = False
+    import warnings
+    warnings.warn(
+        "Cython extensions not available, falling back to Numba. "
+        "Run 'python setup.py build_ext --inplace' to build Cython extensions."
+    )
 
 
 @dataclass
@@ -82,6 +97,10 @@ class HNSWIndex(VectorIndex):
         # Vector storage reference
         self.vectors: np.ndarray = None
 
+        # Cached graph connections for Cython (built on-demand)
+        self._graph_connections_cache: Dict = None
+        self._vectors_f64_cache: np.ndarray = None
+
     def _assign_layer(self) -> int:
         """
         Assign a random layer to a new node.
@@ -133,6 +152,24 @@ class HNSWIndex(VectorIndex):
                 progress = (i + 1) / total * 100
                 print(f"Progress: {i+1:,}/{total:,} vectors ({progress:.1f}%)", flush=True)
 
+        # Pre-build cache for Cython if available
+        if CYTHON_AVAILABLE and hnsw_core is not None:
+            self._build_cython_cache()
+
+    def _build_cython_cache(self):
+        """Build cached data structures for Cython-optimized search."""
+        # Convert vectors to float64 once
+        if self.vectors.dtype != np.float64:
+            self._vectors_f64_cache = self.vectors.astype(np.float64)
+        else:
+            self._vectors_f64_cache = self.vectors
+
+        # Build graph connections dict once
+        self._graph_connections_cache = {}
+        for node_id, node in self.nodes.items():
+            for lc, neighbors in node.connections.items():
+                self._graph_connections_cache[(node_id, lc)] = neighbors
+
     def insert(self, vector: np.ndarray, vector_id: int) -> None:
         """
         Insert a vector into the HNSW graph.
@@ -147,6 +184,10 @@ class HNSWIndex(VectorIndex):
             vector: Vector to insert (dimension,)
             vector_id: ID for the vector
         """
+        # Invalidate cache when structure changes
+        self._graph_connections_cache = None
+        self._vectors_f64_cache = None
+
         # Assign layer for new node using exponential decay
         node_layer = self._assign_layer()
 
@@ -292,6 +333,26 @@ class HNSWIndex(VectorIndex):
         Returns:
             List of (vector_id, distance) tuples sorted by distance
         """
+        # Use Cython-optimized search if available
+        if CYTHON_AVAILABLE and hnsw_core is not None:
+            # Build cache if not already done
+            if self._graph_connections_cache is None:
+                self._build_cython_cache()
+
+            # Convert query to float64 for Cython
+            query_f64 = query.astype(np.float64) if query.dtype != np.float64 else query
+
+            return hnsw_core.search_layer(
+                query_f64,
+                self._vectors_f64_cache,
+                entry_points,
+                num_closest,
+                layer,
+                self._graph_connections_cache,
+                self.metric
+            )
+
+        # Fallback to Python implementation
         # Track visited nodes to avoid cycles
         visited = set(entry_points)
 

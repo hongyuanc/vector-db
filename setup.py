@@ -14,6 +14,14 @@ extensions = [
         extra_compile_args=["-O3", "-march=native"],
         extra_link_args=["-O3"],
     ),
+    Extension(
+        "src.index.hnsw_core",
+        ["src/index/hnsw_core.pyx"],
+        include_dirs=[np.get_include()],
+        extra_compile_args=["-O3", "-march=native", "-std=c++11"],
+        extra_link_args=["-O3"],
+        language="c++",  # Use C++ for STL containers
+    ),
 ]
 
 setup(
