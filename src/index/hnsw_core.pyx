@@ -196,3 +196,104 @@ def search_layer(
     result_list.reverse()
 
     return result_list
+
+
+def select_neighbors(
+    list candidates,
+    int M,
+    str metric
+):
+    """
+    Cython-optimized neighbor selection.
+
+    Selects M nearest neighbors from candidates using a simple heuristic:
+    sort by distance and take the M closest.
+
+    Args:
+        candidates: List of (vector_id, distance) tuples
+        M: Maximum number of neighbors to select
+        metric: Distance metric ("euclidean" or "cosine")
+
+    Returns:
+        List of selected vector IDs
+    """
+    cdef int n_candidates = len(candidates)
+    cdef list selected_ids = []
+    cdef int i
+    cdef int vid
+    cdef double dist
+
+    # Handle edge case: fewer candidates than M
+    if n_candidates <= M:
+        for vid, dist in candidates:
+            selected_ids.append(vid)
+        return selected_ids
+
+    # Sort candidates by distance
+    # For cosine: higher similarity = better (negate for sorting)
+    # For euclidean: lower distance = better
+    cdef list sorted_candidates
+    if metric == "cosine":
+        # Higher similarity is better, so negate for ascending sort
+        sorted_candidates = sorted(candidates, key=lambda x: -x[1])
+    else:
+        # Lower distance is better
+        sorted_candidates = sorted(candidates, key=lambda x: x[1])
+
+    # Select top M
+    for i in range(min(M, n_candidates)):
+        vid = sorted_candidates[i][0]
+        selected_ids.append(vid)
+
+    return selected_ids
+
+
+def prune_connections(
+    cnp.ndarray[cnp.float64_t, ndim=2] vectors,
+    int node_id,
+    set connection_ids,
+    int M,
+    str metric
+):
+    """
+    Cython-optimized connection pruning.
+
+    This is a critical optimization for HNSW insertion. When a node's
+    connections exceed M, we need to:
+    1. Compute distances from node to all its connections
+    2. Select the best M neighbors
+    3. Return the pruned connection set
+
+    This function does all of this in C, avoiding Python loops over
+    distance calculations.
+
+    Args:
+        vectors: All vectors in the index (2D, float64)
+        node_id: ID of the node whose connections to prune
+        connection_ids: Set of connection IDs (will be consumed)
+        M: Maximum number of connections to keep
+        metric: Distance metric ("euclidean" or "cosine")
+
+    Returns:
+        List of selected connection IDs (length <= M)
+    """
+    cdef int dimension = vectors.shape[1]
+    cdef double[:, ::1] vectors_view = vectors
+    cdef double[::1] node_vec = vectors_view[node_id]
+
+    cdef list candidates = []
+    cdef int conn_id
+    cdef double dist
+    cdef bint use_euclidean = (metric == "euclidean")
+
+    # Compute distances to all connections
+    for conn_id in connection_ids:
+        if use_euclidean:
+            dist = c_euclidean_distance_inline(node_vec, vectors_view[conn_id], dimension)
+        else:  # cosine
+            dist = c_cosine_similarity_inline(node_vec, vectors_view[conn_id], dimension)
+
+        candidates.append((conn_id, dist))
+
+    # Select best M using the optimized neighbor selection
+    return select_neighbors(candidates, M, metric)
