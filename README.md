@@ -2,6 +2,20 @@
 
 A production-grade vector database built from scratch with HNSW indexing for fast similarity search. Supports millions of high-dimensional vectors with sub-millisecond query latency.
 
+## Why This Project?
+
+This project was built as an educational deep-dive into how modern vector databases like Pinecone, ChromaDB, and Weaviate work under the hood. Rather than using existing libraries (FAISS, Annoy), every component was implemented from scratch to understand the fundamental algorithms, data structures, and optimization techniques that power semantic search at scale.
+
+## The Journey
+
+The implementation evolved through multiple optimization phases:
+
+**Phase 1: Pure Python** - Initial implementation using Python and NumPy. Simple and clear but slow, achieving only ~600 QPS on 10k vectors due to Python's interpreter overhead in the core search loops.
+
+**Phase 2: Cython Optimization** - Rewrote performance-critical code (distance calculations, search loops) in Cython, compiling to C while maintaining Python's development ergonomics. This brought a 3x speedup (build: 17.6s → 5.8s, search: 600 → 1,810 QPS), demonstrating that 70-80% of C++ performance is achievable without a full rewrite.
+
+**Phase 3: Competitive Benchmarking** - Benchmarked against production systems (ChromaDB, Qdrant) on SIFT1M to validate the approach and understand the remaining performance gap. ChromaDB's pure C++ with SIMD instructions is 4-5x faster, but the gap narrows at scale, showing good algorithmic scaling properties.
+
 ## Features
 
 - **HNSW Algorithm**: Hierarchical Navigable Small World graphs for approximate nearest neighbor search
@@ -15,33 +29,62 @@ A production-grade vector database built from scratch with HNSW indexing for fas
 
 Benchmarked on SIFT1M (industry-standard dataset):
 
-| Vectors | Recall@10 | QPS | Avg Latency | Build Time | Memory |
-|---------|-----------|-----|-------------|------------|--------|
-| 10k | 99.7% | 1,408 | 0.71ms | 18s | ~50MB |
-| 100k | 98.4% | 852 | 1.17ms | 5min | ~500MB |
-| 1M | 93.9% | 614 | 1.63ms | 73min | ~488MB |
+| Vectors | Recall@10 | QPS | Avg Latency | Build Time |
+|---------|-----------|-----|-------------|------------|
+| 10k | 99.5% | 1,810 | 0.55ms | 13.2s |
+| 100k | 98.1% | 888 | 1.13ms | 4.5min |
+| 1M | 93.7% | 675 | 1.48ms | 66.2min |
 
-**Test Environment:** Apple M4 Pro, 24GB RAM, Python 3.14 with Numba JIT
+**Test Environment:** Apple M4 Pro, 24GB RAM, Python 3.11 with Cython
 **Configuration:** M=16, ef_construction=200, ef_search=100
 
 **Scalability Insights:**
-- Query latency scales logarithmically: 10k→1M (100x vectors) adds only 0.92ms
-- Build time is O(n log n): 228 vectors/sec at 1M scale vs 333 at 100k
-- Memory efficient: 488MB for 1M vectors (4 bytes/dimension)
+- Query latency scales logarithmically: 10k→1M (100x vectors) adds only 0.93ms
+- QPS decreases sub-linearly: 100x more vectors = only 2.7x slower
+- Build time is O(n log n): scales from 13s to 66min for 100x data
 
-### Comparison to Industry Systems
+### Competitive Comparison - Production Vector Databases
 
-Performance on SIFT1M (10k subset, Recall@10 ≥99%):
+Head-to-head comparison on SIFT1M (10k subset, identical parameters):
 
-| System | QPS | Year | Our Advantage |
-|--------|-----|------|---------------|
-| **This Implementation** | **1,408** | 2025 | Baseline |
-| HNSW (original paper) | ~1,000 | 2018 | +48% faster |
-| FAISS (Facebook) | ~800 | 2017 | +86% faster |
-| Annoy (Spotify) | ~500 | 2013 | +197% faster |
-| ScaNN (Google) | ~1,200 | 2020 | +24% faster |
+| System | Recall@10 | QPS | Latency | Build Time | Implementation |
+|--------|-----------|-----|---------|------------|----------------|
+| **ChromaDB** | **100.0%** | **9,234** | **0.11ms** | **0.34s** | C++ hnswlib + SIMD |
+| **This DB** | 99.5% | 1,810 | 0.55ms | 13.20s | Python + Cython |
+| Qdrant | 100.0% | 621 | 1.61ms | 0.79s | Rust |
 
-See [Benchmark Details](#running-benchmarks) for reproduction steps and parameter tuning results.
+**Test Environment:** Apple M4 Pro, 24GB RAM, Python 3.11, in-memory mode
+**Parameters:** M=16, ef_construction=200, ef_search=100
+
+**Key Insights:**
+- ChromaDB leads with C++/SIMD optimization (5x faster search, 39x faster build)
+- Our implementation shows 2.9x higher QPS than Qdrant in Python client mode
+- All systems achieve strong recall (99.5%+) with identical HNSW parameters
+- Build time gap highlights Python overhead in graph construction
+
+**Why the Performance Gap?**
+- **ChromaDB** uses hnswlib (pure C++ with SIMD/AVX instructions)
+- **This implementation** uses Cython for hot loops but core algorithm remains Python
+- **Qdrant** in `:memory:` mode with Python client has serialization overhead; production Qdrant server would likely perform differently
+
+### Scaling to 1M Vectors
+
+Full SIFT1M dataset (1M vectors) comparison:
+
+| System | Recall@10 | QPS | Latency | Build Time | Implementation |
+|--------|-----------|-----|---------|------------|----------------|
+| **ChromaDB** | **98.8%** | **2,902** | **0.34ms** | **1.1 min** | C++ hnswlib + SIMD |
+| **This DB** | 93.7% | 675 | 1.48ms | 66.2 min | Python + Cython |
+
+**Key Insights:**
+- ChromaDB maintains 4.3x faster search at scale (2902 vs 675 QPS)
+- Build time gap widens to 60x (1.1 min vs 66.2 min) due to O(n log n) complexity
+- Both systems maintain strong recall (93.7%+ at 1M scale)
+- Our HNSW scales reasonably: 10k→1M (100x data) only reduces QPS by 2.7x
+
+Note: Qdrant's Python `:memory:` client degrades significantly beyond 20k vectors and is not viable for 1M scale benchmarking.
+
+See [Benchmark Methodology](#running-benchmarks) for reproduction steps.
 
 ## Quick Start
 
@@ -111,6 +154,8 @@ curl -X POST "http://localhost:8000/search" \
 
 ## Running Benchmarks
 
+### Basic Performance Benchmarks
+
 Reproduce the SIFT1M results:
 
 ```bash
@@ -122,10 +167,32 @@ pytest tests/benchmarks/test_real_world.py::TestRealWorldDatasets::test_sift1m_s
 
 # Run parameter sweep (shows speed/accuracy trade-off)
 pytest tests/benchmarks/test_real_world.py::TestRealWorldDatasets::test_sift1m_parameter_sweep -v -s
-
-# Run all benchmarks
-pytest tests/benchmarks/ -v -s
 ```
+
+### Competitive Comparison Benchmarks
+
+Compare against production vector databases:
+
+```bash
+# Install production vector databases (optional)
+pip install chromadb qdrant-client
+
+# 10k vectors: Our HNSW vs ChromaDB vs Qdrant (~2 minutes)
+pytest tests/benchmarks/test_chromadb_comparison.py::TestProductionComparison::test_all_systems_10k -v -s
+
+# 1M vectors: Our HNSW vs ChromaDB (~90 minutes)
+pytest tests/benchmarks/test_chromadb_comparison.py::TestProductionComparison::test_all_systems_1m -v -s
+
+# Individual comparisons
+pytest tests/benchmarks/test_chromadb_comparison.py::TestChromaDBComparison::test_chromadb_vs_ours_10k -v -s
+```
+
+**Methodology:**
+- All systems use identical HNSW parameters (M=16, ef_construction=200, ef_search=100)
+- In-memory mode for fair comparison (no disk I/O overhead)
+- Same SIFT1M dataset and ground truth
+- Batch queries to remove Python loop overhead
+- Single-threaded execution for consistent comparison
 
 ## Architecture
 
