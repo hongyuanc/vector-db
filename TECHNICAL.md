@@ -964,7 +964,7 @@ The JSON report includes:
 - build time and vectors-per-second
 - search QPS and latency percentiles: p50, p95, p99, and average
 - recall@k against brute-force ground truth
-- vector/query memory estimates and process peak RSS when available
+- vector/query memory estimates, graph memory estimates, and process peak RSS when available
 
 The Markdown report contains the same information in a compact table so each
 benchmark snapshot can be appended to this document or interview notes.
@@ -998,7 +998,6 @@ explained as a hypothesis, a code change, and a measured result.
 
 - Store benchmark JSON/Markdown snapshots under a versioned `benchmarks/results/` directory.
 - Extend the runner to use already-downloaded SIFT1M subsets for the same structured report format.
-- Add memory accounting for graph edges, not just vector/query arrays and process RSS.
 
 ---
 
@@ -1098,13 +1097,20 @@ useful as a memory/ownership cleanup, but it confirms that the next meaningful
 step is to stop materializing the same graph twice, not just move another
 conversion boundary.
 
+The benchmark report now breaks graph memory out from vector memory. On the same
+SIFT1M 10k run, the graph had 482,450 directed edges in Python node/set storage
+and the same 482,450 directed edges in the C++ CSR search cache. The Python graph
+estimate was 44.5242 MiB, while the C++ CSR cache was 2.4890 MiB. The combined
+reported graph total was 47.0131 MiB. This makes the next ownership problem
+visible: most graph memory is in Python sets, not in the compact C++ search
+arrays.
+
 ### Next Steps
 
 - Keep the graph resident in C++ after build instead of copying it back into
   Python sets for normal search-only workloads.
 - Preserve or replace incremental `insert()` semantics with a native mutable
   graph object if online updates remain a project goal.
-- Add graph memory accounting to the benchmark report.
 - Run the same C++ batch builder on SIFT1M 100k and update the ChromaDB
   comparison using fresh numbers.
 

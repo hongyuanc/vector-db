@@ -24,7 +24,11 @@ def test_compare_results_calculates_deltas_and_statuses():
             "qps": 1000.0,
             "latency_ms": {"average": 1.0, "p50": 0.8, "p95": 1.5, "p99": 2.0},
             "recall_at_k": 0.9,
-            "memory": {"vector_data_mb": 1.0, "process_peak_rss_mb": 100.0},
+            "memory": {
+                "vector_data_mb": 1.0,
+                "process_peak_rss_mb": 100.0,
+                "graph": {"total_graph_mb": 3.0},
+            },
         }
     )
     candidate = _result(
@@ -34,7 +38,11 @@ def test_compare_results_calculates_deltas_and_statuses():
             "qps": 900.0,
             "latency_ms": {"average": 0.9, "p50": 0.7, "p95": 1.6, "p99": 1.8},
             "recall_at_k": 0.92,
-            "memory": {"vector_data_mb": 1.0, "process_peak_rss_mb": 120.0},
+            "memory": {
+                "vector_data_mb": 1.0,
+                "process_peak_rss_mb": 120.0,
+                "graph": {"total_graph_mb": 2.0},
+            },
         }
     )
 
@@ -57,6 +65,8 @@ def test_compare_results_calculates_deltas_and_statuses():
 
     assert metrics["latency_ms.p95"]["delta"] == 0.1
     assert metrics["latency_ms.p95"]["status"] == "regressed"
+    assert metrics["memory.graph.total_graph_mb"]["delta"] == -1.0
+    assert metrics["memory.graph.total_graph_mb"]["status"] == "improved"
 
 
 def test_main_writes_markdown_comparison(tmp_path):
@@ -74,7 +84,11 @@ def test_main_writes_markdown_comparison(tmp_path):
                     "qps": 1000.0,
                     "latency_ms": {"average": 1.0, "p50": 0.8, "p95": 1.5, "p99": 2.0},
                     "recall_at_k": 0.9,
-                    "memory": {"vector_data_mb": 1.0, "process_peak_rss_mb": 100.0},
+                    "memory": {
+                        "vector_data_mb": 1.0,
+                        "process_peak_rss_mb": 100.0,
+                        "graph": {"total_graph_mb": 3.0},
+                    },
                 }
             )
         )
@@ -88,7 +102,11 @@ def test_main_writes_markdown_comparison(tmp_path):
                     "qps": 900.0,
                     "latency_ms": {"average": 0.9, "p50": 0.7, "p95": 1.6, "p99": 1.8},
                     "recall_at_k": 0.92,
-                    "memory": {"vector_data_mb": 1.0, "process_peak_rss_mb": 120.0},
+                    "memory": {
+                        "vector_data_mb": 1.0,
+                        "process_peak_rss_mb": 120.0,
+                        "graph": {"total_graph_mb": 2.0},
+                    },
                 }
             )
         )

@@ -42,6 +42,10 @@ def test_run_benchmark_suite_returns_structured_metrics():
     assert set(metrics["latency_ms"]) == {"p50", "p95", "p99", "average"}
     assert metrics["latency_ms"]["p99"] >= metrics["latency_ms"]["p50"]
     assert "vector_data_mb" in metrics["memory"]
+    assert "graph" in metrics["memory"]
+    assert metrics["memory"]["graph"]["python_edges"] > 0
+    assert metrics["memory"]["graph"]["cpp_edges"] > 0
+    assert metrics["memory"]["graph"]["total_graph_mb"] > 0
 
     assert result["environment"]["git_commit"]
     assert "python" in result["environment"]
@@ -91,3 +95,4 @@ def test_main_writes_json_and_markdown_reports(tmp_path):
     assert "# Benchmark Results" in markdown
     assert "Recall@3" in markdown
     assert "p99 Latency" in markdown
+    assert "Graph Total" in markdown

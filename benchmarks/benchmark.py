@@ -224,6 +224,44 @@ def _peak_rss_mb() -> float | None:
     return round(bytes_used / BYTES_PER_MIB, 2)
 
 
+def _estimate_graph_memory(index: HNSWIndex) -> dict[str, int | float]:
+    """Estimate graph memory across Python nodes and C++ CSR search caches."""
+    python_layers = set()
+    python_edge_count = 0
+    python_bytes = sys.getsizeof(index.nodes)
+    int_size = sys.getsizeof(0)
+
+    for node in index.nodes.values():
+        python_bytes += sys.getsizeof(node)
+        python_bytes += sys.getsizeof(node.connections)
+        for layer, neighbors in node.connections.items():
+            python_layers.add(layer)
+            python_edge_count += len(neighbors)
+            python_bytes += sys.getsizeof(neighbors)
+            python_bytes += len(neighbors) * int_size
+
+    cpp_layer_count = 0
+    cpp_edge_count = 0
+    cpp_bytes = 0
+    if index._cpp_graph_cache is not None:
+        for offsets, neighbors in index._cpp_graph_cache.values():
+            cpp_layer_count += 1
+            cpp_edge_count += int(len(neighbors))
+            cpp_bytes += int(offsets.nbytes + neighbors.nbytes)
+
+    return {
+        "python_nodes": len(index.nodes),
+        "python_layers": len(python_layers),
+        "python_edges": python_edge_count,
+        "python_graph_mb": round(python_bytes / BYTES_PER_MIB, 4),
+        "cpp_layers": cpp_layer_count,
+        "cpp_edges": cpp_edge_count,
+        "cpp_graph_mb": round(cpp_bytes / BYTES_PER_MIB, 4),
+        "total_edges_counted": python_edge_count + cpp_edge_count,
+        "total_graph_mb": round((python_bytes + cpp_bytes) / BYTES_PER_MIB, 4),
+    }
+
+
 def _environment() -> dict[str, Any]:
     status = _git_output(["status", "--porcelain"])
     return {
@@ -310,9 +348,10 @@ def run_benchmark_suite(
     recall = _calculate_recall(predictions, ground_truth, effective_k)
 
     rss_after = _peak_rss_mb()
-    memory: dict[str, float | None] = {
+    memory: dict[str, Any] = {
         "vector_data_mb": round(float(vectors.nbytes) / BYTES_PER_MIB, 2),
         "query_data_mb": round(float(queries.nbytes) / BYTES_PER_MIB, 2),
+        "graph": _estimate_graph_memory(index),
         "process_peak_rss_mb": rss_after,
     }
     if rss_before is not None and rss_after is not None:
@@ -402,6 +441,11 @@ def format_markdown_report(result: dict[str, Any]) -> str:
             f"| p99 Latency | {latency['p99']:.4f} ms |",
             f"| Recall@{k} | {metrics['recall_at_k']:.4f} |",
             f"| Vector Data | {memory['vector_data_mb']:.2f} MiB |",
+            f"| Python Graph | {memory['graph']['python_graph_mb']:.4f} MiB |",
+            f"| Python Graph Edges | {memory['graph']['python_edges']} |",
+            f"| C++ CSR Graph | {memory['graph']['cpp_graph_mb']:.4f} MiB |",
+            f"| C++ CSR Edges | {memory['graph']['cpp_edges']} |",
+            f"| Graph Total | {memory['graph']['total_graph_mb']:.4f} MiB |",
             f"| Process Peak RSS | {memory['process_peak_rss_mb']} MiB |",
             "",
         ]

@@ -174,8 +174,9 @@ python benchmarks/benchmark.py \
 
 The JSON output records the dataset, HNSW configuration, git commit, dirty
 worktree state, Python/NumPy versions, Cython availability, build time, QPS,
-p50/p95/p99 latency, recall@k, and memory estimates. The Markdown output is
-intended for copying benchmark snapshots into the technical documentation.
+p50/p95/p99 latency, recall@k, and memory estimates, including Python graph and
+C++ CSR graph storage. The Markdown output is intended for copying benchmark
+snapshots into the technical documentation.
 
 Compare two JSON reports after an optimization:
 
@@ -205,6 +206,10 @@ The earlier insertion-time pruning helper did not improve build time on its own.
 The useful boundary was moving construction traversal and mutable adjacency
 together. The builder now also returns the CSR search cache directly, avoiding a
 post-build walk over Python sets to recreate adjacency arrays.
+
+The benchmark report now makes graph memory visible. On SIFT1M 10k, the Python
+graph estimate is about 44.5 MiB, while the C++ CSR search cache for the same
+directed edges is about 2.5 MiB.
 
 ### Basic Performance Benchmarks
 

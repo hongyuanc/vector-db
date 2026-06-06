@@ -23,6 +23,7 @@ METRIC_SPECS = {
     "latency_ms.p95": {"higher_is_better": False},
     "latency_ms.p99": {"higher_is_better": False},
     "recall_at_k": {"higher_is_better": True},
+    "memory.graph.total_graph_mb": {"higher_is_better": False},
     "memory.process_peak_rss_mb": {"higher_is_better": False},
 }
 
