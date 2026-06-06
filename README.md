@@ -211,9 +211,11 @@ post-build walk over Python sets to recreate adjacency arrays.
 
 The batch build path now skips Python edge materialization for normal search-only
 workloads. On SIFT1M 10k, the benchmark reports zero Python graph edges, about
-1.4 MiB of Python node metadata, and about 2.5 MiB for the C++ CSR graph. Save,
-delete, and explicit graph inspection can still lazily rebuild Python connection
-sets from the CSR cache.
+1.4 MiB of Python node metadata, and about 2.5 MiB for the C++ CSR graph.
+Save/load preserve that compact CSR shape. Incremental `insert()` and `delete()`
+still materialize Python connection sets, and now emit a runtime warning so the
+memory tradeoff is explicit. `HNSWIndex.graph_storage_mode` reports whether the
+graph is currently `compact_csr` or `materialized_python`.
 
 ### Basic Performance Benchmarks
 

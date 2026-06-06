@@ -796,7 +796,8 @@ class TestDelete:
         assert len(index.nodes) == 3, "Should have 3 nodes before deletion"
 
         # Delete middle vector
-        index.delete(1)
+        with pytest.warns(RuntimeWarning, match="materializes the compact CSR graph"):
+            index.delete(1)
 
         assert len(index.nodes) == 2, "Should have 2 nodes after deletion"
         assert 1 not in index.nodes, "Deleted node should not exist"
@@ -843,7 +844,8 @@ class TestDelete:
         old_entry = index.entry_point
 
         # Delete entry point
-        index.delete(old_entry)
+        with pytest.warns(RuntimeWarning, match="materializes the compact CSR graph"):
+            index.delete(old_entry)
 
         # Should have a new entry point
         assert index.entry_point is not None, "Should have new entry point"
@@ -862,7 +864,8 @@ class TestDelete:
         index.build(vectors)
 
         # Delete all
-        index.delete(0)
+        with pytest.warns(RuntimeWarning, match="materializes the compact CSR graph"):
+            index.delete(0)
         index.delete(1)
 
         assert len(index.nodes) == 0, "Should have no nodes"
@@ -889,7 +892,8 @@ class TestDelete:
         index.build(vectors)
 
         # Delete some vectors
-        index.delete(5)
+        with pytest.warns(RuntimeWarning, match="materializes the compact CSR graph"):
+            index.delete(5)
         index.delete(10)
         index.delete(15)
 

@@ -13,6 +13,7 @@ Key concepts:
 """
 
 import heapq
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -114,6 +115,24 @@ class HNSWIndex(VectorIndex):
         self._cpp_graph_cache: dict = None
         self._vectors_f32_cache: np.ndarray = None
         self._python_graph_materialized = True
+
+    @property
+    def graph_storage_mode(self) -> str:
+        """
+        Describe the current HNSW graph ownership shape.
+
+        Returns:
+            "compact_csr" when graph edges live only in C++ CSR arrays.
+            "materialized_python" when Python node connection sets are present.
+            "empty" when the index has no nodes.
+        """
+        if not self.nodes:
+            return "empty"
+        if self._cpp_graph_cache is not None and not self._python_graph_materialized:
+            return "compact_csr"
+        if self._python_graph_materialized:
+            return "materialized_python"
+        return "unknown"
 
     def _assign_layer(self) -> int:
         """
@@ -273,6 +292,18 @@ class HNSWIndex(VectorIndex):
         self._python_graph_materialized = True
         self._graph_connections_cache = None
 
+    def _ensure_mutable_python_graph(self, operation: str) -> None:
+        """Materialize compact CSR graph before a mutating operation."""
+        if not self._python_graph_materialized and self._cpp_graph_cache is not None:
+            warnings.warn(
+                f"{operation} materializes the compact CSR graph into Python "
+                "connection sets; this keeps mutation behavior available but "
+                "increases graph memory until the index is rebuilt compactly.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        self._ensure_python_graph_materialized()
+
     def _load_cpp_layers(self, layers: dict) -> None:
         """Load C++ builder CSR layers into the post-build search cache."""
         if not layers:
@@ -416,7 +447,7 @@ class HNSWIndex(VectorIndex):
         """
         # Note: We incrementally update graph cache during build for performance
         # Vectors_f64_cache remains valid during build
-        self._ensure_python_graph_materialized()
+        self._ensure_mutable_python_graph("insert()")
         had_existing_nodes = bool(self.nodes)
         self._cpp_graph_cache = None
         self._vectors_f32_cache = None
@@ -815,7 +846,7 @@ class HNSWIndex(VectorIndex):
         if vector_id not in self.nodes:
             raise ValueError(f"Vector ID {vector_id} not found in index")
 
-        self._ensure_python_graph_materialized()
+        self._ensure_mutable_python_graph("delete()")
         self._cpp_graph_cache = None
         self._vectors_f32_cache = None
 

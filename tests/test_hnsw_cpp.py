@@ -360,12 +360,45 @@ def test_insert_after_cpp_batch_build_materializes_existing_graph(monkeypatch):
 
     extended_vectors = np.vstack([vectors, np.array([[3.0, 0.0]], dtype=np.float32)])
     index.vectors = extended_vectors
-    index.insert(extended_vectors[3], vector_id=3)
+    assert index.graph_storage_mode == "compact_csr"
+    with pytest.warns(RuntimeWarning, match="materializes the compact CSR graph"):
+        index.insert(extended_vectors[3], vector_id=3)
 
     assert index._python_graph_materialized is True
+    assert index.graph_storage_mode == "materialized_python"
     assert index._graph_connections_cache is not None
     assert any(3 in neighbors for node in index.nodes.values() for neighbors in node.connections.values())
     assert index.search(extended_vectors[3], k=1)[0][0] == 3
+
+
+def test_delete_after_cpp_batch_build_materializes_with_warning(monkeypatch):
+    import src.index.hnsw as hnsw_module
+
+    if not hnsw_module.CPP_AVAILABLE:
+        pytest.skip("C++ extension is not available")
+
+    monkeypatch.setattr(HNSWIndex, "_assign_layer", lambda self: 0)
+
+    index = HNSWIndex(M=2, ef_construction=8, metric="euclidean")
+    vectors = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    index.build(vectors)
+
+    assert index.graph_storage_mode == "compact_csr"
+    with pytest.warns(RuntimeWarning, match="materializes the compact CSR graph"):
+        index.delete(2)
+
+    assert index._python_graph_materialized is True
+    assert index.graph_storage_mode == "materialized_python"
+    assert 2 not in index.nodes
+    assert all(2 not in neighbors for node in index.nodes.values() for neighbors in node.connections.values())
 
 
 def test_cpp_search_layer_matches_cosine_order():

@@ -1073,6 +1073,8 @@ primitives into native code:
 - `HNSWIndex.materialize_python_graph()` lazily rebuilds Python `set`-based
   connections from CSR when graph inspection, save, delete, or mutation needs
   the older Python representation.
+- `HNSWIndex.graph_storage_mode` exposes whether the graph is currently
+  `compact_csr`, `materialized_python`, or empty.
 
 This is not a full C++ rewrite. Python still owns:
 
@@ -1199,10 +1201,25 @@ one process, so they are useful as run context but not as isolated per-variant
 memory deltas. The loaded graph estimates are the clearer signal for this
 specific persistence comparison.
 
+The compact graph is now explicitly treated as a read-optimized batch index
+shape. What was there before: `insert()` and `delete()` already called
+`_ensure_python_graph_materialized()`, but that conversion happened silently.
+That made it easy to accidentally turn a compact CSR index back into Python
+edge sets without noticing the memory-shape change.
+
+What was implemented: mutating a compact CSR index still works, but `insert()`
+and `delete()` now emit a `RuntimeWarning` before materializing Python
+connection sets. The warning states that mutation keeps compatibility available
+but increases graph memory until the index is rebuilt compactly.
+`graph_storage_mode` gives tests, benchmarks, and users a small public signal
+for the current graph shape. This keeps the project honest about the current
+tradeoff: batch-built indexes are compact for build/search/save/load, while
+online mutation remains supported through the older materialized Python graph.
+
 ### Next Steps
 
-- Preserve or replace incremental `insert()` and delete semantics with a native
-  mutable graph object if online updates remain a project goal.
+- Decide whether online mutation is a project goal. If yes, replace the
+  materializing mutation compatibility path with a native mutable graph object.
 - Run the same C++ batch builder on SIFT1M 100k and update the ChromaDB
   comparison using fresh numbers.
 
