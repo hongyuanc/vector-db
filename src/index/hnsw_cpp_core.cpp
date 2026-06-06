@@ -446,7 +446,10 @@ BuildGraphResult build_graph(
         max_connections <= 0 ||
         ef_construction <= 0
     ) {
-        return {-1, 0, {}, {}};
+        BuildGraphResult empty_result;
+        empty_result.entry_point = -1;
+        empty_result.max_layer = 0;
+        return empty_result;
     }
 
     const bool use_euclidean = metric == "euclidean";
@@ -574,6 +577,37 @@ BuildGraphResult build_graph(
             connection.neighbors = node.connections[layer];
             std::sort(connection.neighbors.begin(), connection.neighbors.end());
             result.connections.push_back(connection);
+        }
+    }
+
+    for (int layer = 0; layer <= current_max_layer; ++layer) {
+        CsrLayer csr_layer;
+        csr_layer.layer = layer;
+        csr_layer.offsets.resize(static_cast<std::size_t>(n_vectors + 1), 0);
+
+        for (int node_id = 0; node_id < n_vectors; ++node_id) {
+            csr_layer.offsets[static_cast<std::size_t>(node_id)] =
+                static_cast<int>(csr_layer.neighbors.size());
+
+            const BuildNode& node = nodes[static_cast<std::size_t>(node_id)];
+            if (static_cast<std::size_t>(layer) >= node.connections.size()) {
+                continue;
+            }
+
+            std::vector<int> sorted_neighbors = node.connections[static_cast<std::size_t>(layer)];
+            std::sort(sorted_neighbors.begin(), sorted_neighbors.end());
+            csr_layer.neighbors.insert(
+                csr_layer.neighbors.end(),
+                sorted_neighbors.begin(),
+                sorted_neighbors.end()
+            );
+        }
+
+        csr_layer.offsets[static_cast<std::size_t>(n_vectors)] =
+            static_cast<int>(csr_layer.neighbors.size());
+
+        if (!csr_layer.neighbors.empty()) {
+            result.layers.push_back(csr_layer);
         }
     }
 

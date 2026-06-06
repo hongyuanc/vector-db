@@ -1034,6 +1034,9 @@ primitives into native code:
 - `hnsw_cpp.build_graph()` now owns batch HNSW construction for `HNSWIndex.build()`:
   it samples no randomness itself, but receives Python-sampled levels, builds
   mutable adjacency in C++, and returns the completed graph to Python.
+- The C++ builder also returns CSR search layers directly. `HNSWIndex.build()`
+  now reuses those arrays instead of walking Python sets to rebuild the same
+  C++ search cache after construction.
 
 This is not a full C++ rewrite. Python still owns:
 
@@ -1061,6 +1064,7 @@ SIFT1M 10k, `M=16`, `ef_construction=200`, `ef_search=50`, 100 queries:
 | C++ search cache | 17.14s | 10,443.59 | 0.0950ms | 0.1387ms | 99.10% |
 | C++ search + C++ pruning | 17.50s | 10,146.75 | 0.0977ms | 0.1450ms | 99.10% |
 | C++ batch build + C++ search | 2.46s | 11,138.39 | 0.0892ms | 0.1348ms | 99.10% |
+| C++ batch build + direct CSR cache | 2.65s | 10,041.38 | 0.0988ms | 0.1560ms | 99.10% |
 
 The C++ layer traversal improved QPS by about 4.7x and reduced p99 latency by
 about 79% at the same recall. Build time did not improve because graph
@@ -1085,10 +1089,19 @@ higher in this run: 4,636.92 MiB versus 4,343.42 MiB. That likely reflects the
 temporary C++ graph, Python graph materialization, and post-build CSR cache all
 being alive during the benchmark process.
 
+The direct CSR cache update removes one redundant post-build conversion: C++
+already has the final adjacency, so it now returns CSR arrays for search along
+with the Python connection rows. This reduced peak process RSS in the 10k sample
+from 4,636.92 MiB to 4,144.39 MiB, while Recall@10 stayed unchanged. It did not
+improve speed in this run: build time was 2.65s and QPS was 10,041.38. That is
+useful as a memory/ownership cleanup, but it confirms that the next meaningful
+step is to stop materializing the same graph twice, not just move another
+conversion boundary.
+
 ### Next Steps
 
 - Keep the graph resident in C++ after build instead of copying it back into
-  Python sets and then rebuilding CSR arrays for search.
+  Python sets for normal search-only workloads.
 - Preserve or replace incremental `insert()` semantics with a native mutable
   graph object if online updates remain a project goal.
 - Add graph memory accounting to the benchmark report.

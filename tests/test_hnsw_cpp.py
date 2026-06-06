@@ -111,6 +111,7 @@ def test_cpp_build_graph_returns_searchable_connections():
     assert graph["entry_point"] == 1
     assert graph["max_layer"] == 1
     assert graph["levels"] == [0, 1, 0, 0, 0]
+    assert "layers" in graph
 
     connections = {
         (node_id, layer): set(neighbors)
@@ -119,6 +120,13 @@ def test_cpp_build_graph_returns_searchable_connections():
     assert set(connections[(0, 0)])
     assert all(len(neighbors) <= 4 for (_node_id, layer), neighbors in connections.items() if layer == 0)
     assert all(0 <= neighbor < len(vectors) for neighbors in connections.values() for neighbor in neighbors)
+
+    layer_zero = graph["layers"][0]
+    assert layer_zero["offsets"].dtype == np.int32
+    assert layer_zero["neighbors"].dtype == np.int32
+    assert len(layer_zero["offsets"]) == len(vectors) + 1
+    assert layer_zero["offsets"][0] == 0
+    assert layer_zero["offsets"][-1] == len(layer_zero["neighbors"])
 
 
 def test_hnsw_build_uses_cpp_batch_builder_when_available(monkeypatch):
@@ -154,6 +162,16 @@ def test_hnsw_build_uses_cpp_batch_builder_when_available(monkeypatch):
                     (1, 1, [0]),
                     (2, 0, [1]),
                 ],
+                "layers": {
+                    0: {
+                        "offsets": np.array([0, 1, 3, 4], dtype=np.int32),
+                        "neighbors": np.array([1, 0, 2, 1], dtype=np.int32),
+                    },
+                    1: {
+                        "offsets": np.array([0, 0, 1, 1], dtype=np.int32),
+                        "neighbors": np.array([0], dtype=np.int32),
+                    },
+                },
             }
 
     assigned_layers = iter([0, 1, 0])
@@ -188,6 +206,60 @@ def test_hnsw_build_uses_cpp_batch_builder_when_available(monkeypatch):
     assert index.nodes[1].layer == 1
     assert index.nodes[1].connections[0] == {0, 2}
     assert index.nodes[1].connections[1] == {0}
+    assert 0 in index._cpp_graph_cache
+    assert np.array_equal(index._cpp_graph_cache[0][0], np.array([0, 1, 3, 4], dtype=np.int32))
+    assert np.array_equal(index._cpp_graph_cache[0][1], np.array([1, 0, 2, 1], dtype=np.int32))
+
+
+def test_hnsw_build_reuses_cpp_builder_cache(monkeypatch):
+    import src.index.hnsw as hnsw_module
+
+    class FakeCppModule:
+        def build_graph(
+            self,
+            vectors,
+            levels,
+            max_connections,
+            ef_construction,
+            metric,
+        ):
+            return {
+                "entry_point": 0,
+                "max_layer": 0,
+                "levels": [0, 0],
+                "connections": [
+                    (0, 0, [1]),
+                    (1, 0, [0]),
+                ],
+                "layers": {
+                    0: {
+                        "offsets": np.array([0, 1, 2], dtype=np.int32),
+                        "neighbors": np.array([1, 0], dtype=np.int32),
+                    },
+                },
+            }
+
+    def fail_rebuild(self):
+        raise AssertionError("build should reuse c++ builder cache")
+
+    monkeypatch.setattr(hnsw_module, "CPP_AVAILABLE", True)
+    monkeypatch.setattr(hnsw_module, "hnsw_cpp", FakeCppModule())
+    monkeypatch.setattr(HNSWIndex, "_assign_layer", lambda self: 0)
+    monkeypatch.setattr(HNSWIndex, "_build_cpp_cache", fail_rebuild)
+
+    index = HNSWIndex(M=2, ef_construction=4, metric="euclidean")
+    vectors = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+    index.build(vectors)
+
+    assert np.array_equal(index._cpp_graph_cache[0][0], np.array([0, 1, 2], dtype=np.int32))
+    assert np.array_equal(index._cpp_graph_cache[0][1], np.array([1, 0], dtype=np.int32))
 
 
 def test_cpp_search_layer_matches_cosine_order():

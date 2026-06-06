@@ -182,7 +182,13 @@ class HNSWIndex(VectorIndex):
         # Pre-build cache for Cython if available
         if self.vectors is not None and self.nodes and CYTHON_AVAILABLE and hnsw_core is not None:
             self._build_cython_cache()
-        if self.vectors is not None and self.nodes and CPP_AVAILABLE and hnsw_cpp is not None:
+        if (
+            self.vectors is not None
+            and self.nodes
+            and CPP_AVAILABLE
+            and hnsw_cpp is not None
+            and self._cpp_graph_cache is None
+        ):
             self._build_cpp_cache()
 
     def _build_with_python_insert(self, vectors: np.ndarray) -> None:
@@ -210,9 +216,25 @@ class HNSWIndex(VectorIndex):
             node = self.nodes[int(node_id)]
             node.connections[int(layer)] = {int(neighbor_id) for neighbor_id in neighbors}
 
+        self._load_cpp_layers(graph.get("layers", {}))
+
         entry_point = int(graph["entry_point"])
         self.entry_point = entry_point if entry_point >= 0 else None
         self.max_layer = int(graph["max_layer"])
+
+    def _load_cpp_layers(self, layers: dict) -> None:
+        """Load C++ builder CSR layers into the post-build search cache."""
+        if not layers:
+            self._cpp_graph_cache = None
+            return
+
+        self._cpp_graph_cache = {
+            int(layer): (
+                np.ascontiguousarray(layer_data["offsets"], dtype=np.int32),
+                np.ascontiguousarray(layer_data["neighbors"], dtype=np.int32),
+            )
+            for layer, layer_data in layers.items()
+        }
 
     def _build_cython_cache(self):
         """Build cached data structures for Cython-optimized search."""

@@ -16,11 +16,18 @@ struct LayerConnection {
     std::vector<int> neighbors;
 };
 
+struct CsrLayer {
+    int layer;
+    std::vector<int> offsets;
+    std::vector<int> neighbors;
+};
+
 struct BuildGraphResult {
     int entry_point;
     int max_layer;
     std::vector<int> levels;
     std::vector<LayerConnection> connections;
+    std::vector<CsrLayer> layers;
 };
 
 std::vector<SearchResult> search_layer(

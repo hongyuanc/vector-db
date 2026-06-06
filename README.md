@@ -203,7 +203,8 @@ the same 99.1% Recall@10. The C++ batch builder then reduced build time from
 
 The earlier insertion-time pruning helper did not improve build time on its own.
 The useful boundary was moving construction traversal and mutable adjacency
-together.
+together. The builder now also returns the CSR search cache directly, avoiding a
+post-build walk over Python sets to recreate adjacency arrays.
 
 ### Basic Performance Benchmarks
 

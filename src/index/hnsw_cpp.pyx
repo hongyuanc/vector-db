@@ -25,11 +25,17 @@ cdef extern from "hnsw_cpp_core.hpp" namespace "vectordb":
         int layer
         vector[int] neighbors
 
+    cdef cppclass CppCsrLayer "vectordb::CsrLayer":
+        int layer
+        vector[int] offsets
+        vector[int] neighbors
+
     cdef cppclass CppBuildGraphResult "vectordb::BuildGraphResult":
         int entry_point
         int max_layer
         vector[int] levels
         vector[CppLayerConnection] connections
+        vector[CppCsrLayer] layers
 
     vector[CppSearchResult] cpp_search_layer "vectordb::search_layer"(
         const float* query,
@@ -192,9 +198,12 @@ def build_graph(
     cdef Py_ssize_t i
     cdef Py_ssize_t j
     cdef CppLayerConnection connection
+    cdef CppCsrLayer csr_layer
     cdef list output_levels = []
     cdef list output_connections = []
+    cdef dict output_layers = {}
     cdef list neighbors
+    cdef list offsets
 
     for i in range(raw.levels.size()):
         output_levels.append(raw.levels[i])
@@ -206,9 +215,23 @@ def build_graph(
             neighbors.append(connection.neighbors[j])
         output_connections.append((connection.node_id, connection.layer, neighbors))
 
+    for i in range(raw.layers.size()):
+        csr_layer = raw.layers[i]
+        offsets = []
+        neighbors = []
+        for j in range(csr_layer.offsets.size()):
+            offsets.append(csr_layer.offsets[j])
+        for j in range(csr_layer.neighbors.size()):
+            neighbors.append(csr_layer.neighbors[j])
+        output_layers[csr_layer.layer] = {
+            "offsets": np.asarray(offsets, dtype=np.int32),
+            "neighbors": np.asarray(neighbors, dtype=np.int32),
+        }
+
     return {
         "entry_point": raw.entry_point,
         "max_layer": raw.max_layer,
         "levels": output_levels,
         "connections": output_connections,
+        "layers": output_layers,
     }
