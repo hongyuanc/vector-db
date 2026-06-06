@@ -1168,10 +1168,39 @@ lazy Python graph materialization. Reloading an index can now keep graph edges i
 compact arrays instead of temporarily or permanently reconstructing the Python
 edge sets just to reach the same searchable C++ graph.
 
+The persistence benchmark was then run on SIFT1M 10k and 100k at
+`M=16`, `ef_construction=200`, and `ef_search=50` on commit `b6e0ebd`.
+The benchmark worktree was dirty because `AGENTS.md` was untracked, but the code
+under test was the committed benchmark and persistence code.
+
+| Dataset | Build Time | QPS | p99 Latency | Recall@10 |
+|---------|-----------:|----:|------------:|----------:|
+| SIFT1M 10k | 2.4171s | 10,902.50 | 0.1293ms | 99.10% |
+| SIFT1M 100k | 48.6693s | 5,668.19 | 0.2569ms | 94.67% |
+
+| Dataset | Shape | Save Time | Load Time | File Size | Loaded Graph |
+|---------|-------|----------:|----------:|----------:|-------------:|
+| SIFT1M 10k | Compact CSR | 0.0093s | 0.0066s | 7.6885 MiB | 3.9147 MiB |
+| SIFT1M 10k | Materialized Python graph | 0.0424s | 0.1853s | 6.6740 MiB | 47.0131 MiB |
+| SIFT1M 100k | Compact CSR | 0.1090s | 0.0684s | 77.1979 MiB | 41.6182 MiB |
+| SIFT1M 100k | Materialized Python graph | 0.7714s | 2.7478s | 69.1201 MiB | 470.7456 MiB |
+
+At 10k, compact CSR save was about 4.6x faster and load was about 28.2x faster
+than the materialized path. At 100k, compact CSR save was about 7.1x faster and
+load was about 40.2x faster. The compact files were larger in these runs because
+the CSR arrays are stored directly in the `.npz`, while the Python graph path is
+stored through pickle. For this project stage, the important result is reload
+shape and load cost: compact reload kept Python graph edges at zero and loaded
+only one graph copy, while the materialized path restored Python edge sets and
+then rebuilt the C++ CSR cache, counting the same edges twice.
+
+The process RSS values in this benchmark are `ru_maxrss` high-water marks within
+one process, so they are useful as run context but not as isolated per-variant
+memory deltas. The loaded graph estimates are the clearer signal for this
+specific persistence comparison.
+
 ### Next Steps
 
-- Run the updated persistence benchmark on SIFT1M 10k/100k and append the
-  measured compact-versus-materialized numbers.
 - Preserve or replace incremental `insert()` and delete semantics with a native
   mutable graph object if online updates remain a project goal.
 - Run the same C++ batch builder on SIFT1M 100k and update the ChromaDB
