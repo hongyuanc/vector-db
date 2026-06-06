@@ -1,8 +1,8 @@
-from setuptools import setup, find_packages, Extension
-from Cython.Build import cythonize
 import numpy as np
+from Cython.Build import cythonize
+from setuptools import Extension, find_packages, setup
 
-with open("README.md", "r", encoding="utf-8") as fh:
+with open("README.md", encoding="utf-8") as fh:
     long_description = fh.read()
 
 # Define Cython extensions for performance-critical modules
@@ -21,6 +21,14 @@ extensions = [
         extra_compile_args=["-O3", "-march=native", "-std=c++11"],
         extra_link_args=["-O3"],
         language="c++",  # Use C++ for STL containers
+    ),
+    Extension(
+        "src.index.hnsw_cpp",
+        ["src/index/hnsw_cpp.pyx", "src/index/hnsw_cpp_core.cpp"],
+        include_dirs=[np.get_include(), "src/index"],
+        extra_compile_args=["-O3", "-march=native", "-std=c++11"],
+        extra_link_args=["-O3"],
+        language="c++",
     ),
 ]
 

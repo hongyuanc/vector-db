@@ -108,7 +108,7 @@ python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-# Build Cython extensions (3x speedup)
+# Build Cython/C++ extensions
 python setup.py build_ext --inplace
 
 # Start server
@@ -153,6 +153,57 @@ curl -X POST "http://localhost:8000/search" \
 ```
 
 ## Running Benchmarks
+
+### Reproducible Metrics Report
+
+Use the top-level benchmark runner when you want a clean JSON/Markdown artifact
+for comparing changes across commits:
+
+```bash
+# Synthetic benchmark, no downloads required
+python benchmarks/benchmark.py \
+  --dataset random \
+  --size 10000 \
+  --dimension 128 \
+  --queries 100 \
+  --k 10 \
+  --ef-search 50 \
+  --output benchmarks/results.json \
+  --markdown-output benchmarks/results.md
+```
+
+The JSON output records the dataset, HNSW configuration, git commit, dirty
+worktree state, Python/NumPy versions, Cython availability, build time, QPS,
+p50/p95/p99 latency, recall@k, and memory estimates. The Markdown output is
+intended for copying benchmark snapshots into the technical documentation.
+
+Compare two JSON reports after an optimization:
+
+```bash
+python benchmarks/compare_results.py \
+  benchmarks/baseline.json \
+  benchmarks/candidate.json \
+  --output benchmarks/comparison.md
+```
+
+The comparison marks each metric as improved, regressed, or unchanged based on
+whether higher or lower is better for that metric.
+
+### C++ Search Core
+
+The current build includes C++ HNSW helpers wrapped through Cython. Python still
+owns the public API, storage, metadata, persistence shape, and incremental
+updates, but batch `build()` can construct the graph in C++ and post-build search
+can use compact CSR adjacency arrays with C++ priority queues for layer traversal.
+
+On SIFT1M 10k with `M=16`, `ef_construction=200`, and `ef_search=50`, the C++
+search cache moved query throughput from about 2.2k QPS to about 10.4k QPS at
+the same 99.1% Recall@10. The C++ batch builder then reduced build time from
+17.50s to 2.46s, with the same recall and about 11.1k QPS.
+
+The earlier insertion-time pruning helper did not improve build time on its own.
+The useful boundary was moving construction traversal and mutable adjacency
+together.
 
 ### Basic Performance Benchmarks
 

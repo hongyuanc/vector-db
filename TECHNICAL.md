@@ -924,6 +924,179 @@ pytest tests/benchmarks/test_chromadb_comparison.py::TestChromaDBComparison::tes
 
 ---
 
+## Reproducible Metrics Pipeline
+
+### What Was There Before
+
+The project already had several useful benchmark paths:
+
+- pytest benchmark tests for search latency, recall, real datasets, and production system comparisons
+- `benchmarks/benchmark_cython.py` for measuring the Cython-accelerated HNSW path
+- Markdown benchmark summaries documenting SIFT1M and ChromaDB/Qdrant comparisons
+
+The gap was that `benchmarks/benchmark.py`, the command exposed by `make benchmark`,
+was still a placeholder. It described build time, p50/p95/p99 latency, throughput,
+memory, and recall, but the functions were `TODO/pass`. That made it harder to run
+one consistent command before and after an optimization and then compare artifacts.
+
+### What Was Implemented
+
+`benchmarks/benchmark.py` now runs one benchmark configuration end to end and writes
+structured output:
+
+```bash
+python benchmarks/benchmark.py \
+  --dataset random \
+  --size 10000 \
+  --dimension 128 \
+  --queries 100 \
+  --k 10 \
+  --ef-search 50 \
+  --output benchmarks/results.json \
+  --markdown-output benchmarks/results.md
+```
+
+The JSON report includes:
+
+- dataset name, size, dimension, query count, and seed
+- HNSW parameters: `M`, `ef_construction`, `ef_search`, and metric
+- environment metadata: git commit, dirty worktree state, Python, NumPy, platform, and Cython availability
+- build time and vectors-per-second
+- search QPS and latency percentiles: p50, p95, p99, and average
+- recall@k against brute-force ground truth
+- vector/query memory estimates and process peak RSS when available
+
+The Markdown report contains the same information in a compact table so each
+benchmark snapshot can be appended to this document or interview notes.
+
+`benchmarks/compare_results.py` compares two JSON reports:
+
+```bash
+python benchmarks/compare_results.py \
+  benchmarks/baseline.json \
+  benchmarks/candidate.json \
+  --output benchmarks/comparison.md
+```
+
+The comparison report shows the baseline value, candidate value, absolute delta,
+percentage delta, and status for each metric. Status is directional: lower build
+time and latency are improvements, while higher QPS, build throughput, and recall
+are improvements.
+
+### Why This Matters
+
+Optimization work is only useful if the measurement is repeatable. Before changing
+graph storage, Cython boundaries, filtering, or a possible C++ core, this command
+creates a baseline tied to a specific commit and configuration. That prevents
+ambiguous claims like "faster" or "better recall" and replaces them with numbers
+that can be compared across commits.
+
+This also keeps the project educational: every performance change can now be
+explained as a hypothesis, a code change, and a measured result.
+
+### Next Steps
+
+- Store benchmark JSON/Markdown snapshots under a versioned `benchmarks/results/` directory.
+- Extend the runner to use already-downloaded SIFT1M subsets for the same structured report format.
+- Add memory accounting for graph edges, not just vector/query arrays and process RSS.
+
+---
+
+## C++ HNSW Core Spike
+
+### What Was There Before
+
+The Cython HNSW path had already moved distance calculations and some layer
+search work out of pure Python, but the hot search path still depended on Python
+containers:
+
+- graph edges were cached as Python `dict[(node_id, layer)] -> set(neighbor_ids)`
+- candidate/result queues still used Python `heapq`
+- visited tracking crossed the Python/Cython boundary
+- vectors were converted to float64 for the Cython search cache
+
+Benchmarks showed that search was usable, but a production C++ HNSW core such as
+ChromaDB's hnswlib-backed implementation was still much faster.
+
+### What Was Implemented
+
+The C++ work keeps the database architecture unchanged and ports bounded HNSW
+primitives into native code:
+
+- `src/index/hnsw_cpp_core.cpp` implements HNSW layer search in C++.
+- `src/index/hnsw_cpp.pyx` wraps that C++ function for Python.
+- `HNSWIndex._build_cpp_cache()` converts each graph layer into CSR-style arrays:
+  `offsets` and `neighbors`.
+- `HNSWIndex._search_layer()` now prefers the C++ cache after index build, with
+  the existing Cython and Python paths retained as fallbacks.
+- `hnsw_cpp.prune_connections()` also exposes C++ distance calculation and
+  sorting for insertion-time neighbor pruning.
+- `hnsw_cpp.build_graph()` now owns batch HNSW construction for `HNSWIndex.build()`:
+  it samples no randomness itself, but receives Python-sampled levels, builds
+  mutable adjacency in C++, and returns the completed graph to Python.
+
+This is not a full C++ rewrite. Python still owns:
+
+- the public `HNSWIndex` API
+- incremental `insert()` and delete behavior
+- persistence shape and Python `HNSWNode` objects
+- vector storage, metadata storage, collections, and API routing
+
+### Why This Scope
+
+This chunk answers a narrow question: does moving only layer traversal from
+Python/Cython containers into C++ materially improve search? If the answer were
+no, a larger C++ rewrite would be hard to justify. If the answer were yes, the
+next target would be graph construction. The pruning-only experiment then tested
+whether a tiny build wrapper was enough. It was not, so the next chunk moved
+construction traversal and mutable adjacency together.
+
+### Measured Result
+
+SIFT1M 10k, `M=16`, `ef_construction=200`, `ef_search=50`, 100 queries:
+
+| Version | Build Time | QPS | Avg Latency | p99 Latency | Recall@10 |
+|---------|-----------:|----:|------------:|------------:|----------:|
+| Cython search cache | 16.68s | 2,240.91 | 0.4451ms | 0.6565ms | 99.10% |
+| C++ search cache | 17.14s | 10,443.59 | 0.0950ms | 0.1387ms | 99.10% |
+| C++ search + C++ pruning | 17.50s | 10,146.75 | 0.0977ms | 0.1450ms | 99.10% |
+| C++ batch build + C++ search | 2.46s | 11,138.39 | 0.0892ms | 0.1348ms | 99.10% |
+
+The C++ layer traversal improved QPS by about 4.7x and reduced p99 latency by
+about 79% at the same recall. Build time did not improve because graph
+construction still runs through the existing Python/Cython insertion path.
+
+At `ef_search=100`, the same C++ search path reached 7,726 QPS with 99.60%
+Recall@10. That puts search much closer to the earlier ChromaDB 10k result
+(8,825 QPS), while build remains far behind.
+
+The C++ pruning update did not improve the 10k build benchmark. It moved one
+small calculation into C++, but each insertion still crosses Python objects,
+Python sets, and Python-owned graph mutation. In this run, build time regressed
+by about 2.1% versus the C++ search-only baseline, with unchanged recall. That
+is close enough to benchmark noise that it should not be over-interpreted, but
+it is clear that isolated pruning is not the build bottleneck.
+
+The C++ batch builder is the first construction change that moves the right
+boundary. It reduced 10k build time from 17.50s to 2.46s, an 85.9% improvement,
+while keeping Recall@10 unchanged at 99.10%. Query latency also improved slightly
+because the finished graph still uses the C++ search cache. Peak process RSS was
+higher in this run: 4,636.92 MiB versus 4,343.42 MiB. That likely reflects the
+temporary C++ graph, Python graph materialization, and post-build CSR cache all
+being alive during the benchmark process.
+
+### Next Steps
+
+- Keep the graph resident in C++ after build instead of copying it back into
+  Python sets and then rebuilding CSR arrays for search.
+- Preserve or replace incremental `insert()` semantics with a native mutable
+  graph object if online updates remain a project goal.
+- Add graph memory accounting to the benchmark report.
+- Run the same C++ batch builder on SIFT1M 100k and update the ChromaDB
+  comparison using fresh numbers.
+
+---
+
 ## Future Improvements
 
 ### Phase 6 (Advanced Features)

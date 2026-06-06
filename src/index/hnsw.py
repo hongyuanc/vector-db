@@ -12,27 +12,36 @@ Key concepts:
 - Probabilistic layer assignment
 """
 
-import numpy as np
 import heapq
-from typing import List, Tuple, Dict, Set
 from dataclasses import dataclass, field
+
+import numpy as np
+
 from .base import VectorIndex
 
 # Import Cython-optimized distance functions for performance
 try:
-    from ..utils.distance_cy import euclidean_distance, cosine_similarity
+    from ..utils.distance_cy import cosine_similarity, euclidean_distance
     from . import hnsw_core
     CYTHON_AVAILABLE = True
 except ImportError:
     # Fallback to Numba if Cython not compiled
-    from ..utils.distance import euclidean_distance, cosine_similarity
+    from ..utils.distance import cosine_similarity, euclidean_distance
     hnsw_core = None
     CYTHON_AVAILABLE = False
     import warnings
     warnings.warn(
         "Cython extensions not available, falling back to Numba. "
-        "Run 'python setup.py build_ext --inplace' to build Cython extensions."
+        "Run 'python setup.py build_ext --inplace' to build Cython extensions.",
+        stacklevel=2,
     )
+
+try:
+    from . import hnsw_cpp
+    CPP_AVAILABLE = True
+except ImportError:
+    hnsw_cpp = None
+    CPP_AVAILABLE = False
 
 
 @dataclass
@@ -41,7 +50,7 @@ class HNSWNode:
     vector_id: int
     layer: int
     # connections[layer] = set of neighbor IDs
-    connections: Dict[int, Set[int]] = field(default_factory=lambda: {})
+    connections: dict[int, set[int]] = field(default_factory=lambda: {})
 
 
 class HNSWIndex(VectorIndex):
@@ -90,7 +99,7 @@ class HNSWIndex(VectorIndex):
             self.distance_fn = cosine_similarity
 
         # Graph structure
-        self.nodes: Dict[int, HNSWNode] = {}
+        self.nodes: dict[int, HNSWNode] = {}
         self.entry_point: int = None
         self.max_layer: int = 0
 
@@ -98,8 +107,12 @@ class HNSWIndex(VectorIndex):
         self.vectors: np.ndarray = None
 
         # Cached graph connections for Cython (built on-demand)
-        self._graph_connections_cache: Dict = None
+        self._graph_connections_cache: dict = None
         self._vectors_f64_cache: np.ndarray = None
+
+        # Cached CSR graph connections for C++ search (built after index construction)
+        self._cpp_graph_cache: dict = None
+        self._vectors_f32_cache: np.ndarray = None
 
     def _assign_layer(self) -> int:
         """
@@ -139,8 +152,41 @@ class HNSWIndex(VectorIndex):
         """
         # Store vector data
         self.vectors = vectors
+        self.nodes = {}
+        self.entry_point = None
+        self.max_layer = 0
+        self._graph_connections_cache = None
+        self._vectors_f64_cache = None
+        self._cpp_graph_cache = None
+        self._vectors_f32_cache = None
 
         # Insert each vector into the graph
+        total = len(vectors)
+        if total == 0:
+            return
+
+        if CPP_AVAILABLE and hnsw_cpp is not None and hasattr(hnsw_cpp, "build_graph"):
+            levels = np.asarray([self._assign_layer() for _ in range(total)], dtype=np.int32)
+            graph = hnsw_cpp.build_graph(
+                self._get_vectors_f32(),
+                levels,
+                self.M,
+                self.ef_construction,
+                self.metric,
+            )
+            self._load_cpp_build_result(graph)
+            print(f"Progress: {total:,}/{total:,} vectors (100.0%)", flush=True)
+        else:
+            self._build_with_python_insert(vectors)
+
+        # Pre-build cache for Cython if available
+        if self.vectors is not None and self.nodes and CYTHON_AVAILABLE and hnsw_core is not None:
+            self._build_cython_cache()
+        if self.vectors is not None and self.nodes and CPP_AVAILABLE and hnsw_cpp is not None:
+            self._build_cpp_cache()
+
+    def _build_with_python_insert(self, vectors: np.ndarray) -> None:
+        """Build the graph through the incremental Python/Cython insert path."""
         total = len(vectors)
         log_interval = max(1, total // 20)  # Log 20 times during build
 
@@ -152,9 +198,21 @@ class HNSWIndex(VectorIndex):
                 progress = (i + 1) / total * 100
                 print(f"Progress: {i+1:,}/{total:,} vectors ({progress:.1f}%)", flush=True)
 
-        # Pre-build cache for Cython if available
-        if CYTHON_AVAILABLE and hnsw_core is not None:
-            self._build_cython_cache()
+    def _load_cpp_build_result(self, graph: dict) -> None:
+        """Load a C++ batch build result into the Python node representation."""
+        levels = graph["levels"]
+        self.nodes = {
+            vector_id: HNSWNode(vector_id=vector_id, layer=int(layer))
+            for vector_id, layer in enumerate(levels)
+        }
+
+        for node_id, layer, neighbors in graph["connections"]:
+            node = self.nodes[int(node_id)]
+            node.connections[int(layer)] = {int(neighbor_id) for neighbor_id in neighbors}
+
+        entry_point = int(graph["entry_point"])
+        self.entry_point = entry_point if entry_point >= 0 else None
+        self.max_layer = int(graph["max_layer"])
 
     def _build_cython_cache(self):
         """Build cached data structures for Cython-optimized search."""
@@ -176,6 +234,54 @@ class HNSWIndex(VectorIndex):
                 self._vectors_f64_cache = self.vectors
         return self._vectors_f64_cache
 
+    def _get_vectors_f32(self) -> np.ndarray:
+        """Get or create cached contiguous float32 vectors for C++ operations."""
+        if self._vectors_f32_cache is None:
+            self._vectors_f32_cache = np.ascontiguousarray(self.vectors, dtype=np.float32)
+        return self._vectors_f32_cache
+
+    def _build_cpp_cache(self):
+        """Build per-layer CSR adjacency arrays for C++-optimized search."""
+        if not self.nodes:
+            self._cpp_graph_cache = {}
+            return
+
+        self._get_vectors_f32()
+
+        max_node_id = max(self.nodes)
+        node_count = max_node_id + 1
+        layers = set()
+        for node in self.nodes.values():
+            layers.update(node.connections)
+
+        graph_cache = {}
+        for layer in layers:
+            offsets = np.zeros(node_count + 1, dtype=np.int32)
+            adjacency = []
+
+            for node_id in range(node_count):
+                offsets[node_id] = len(adjacency)
+                node = self.nodes.get(node_id)
+                if node is None:
+                    continue
+
+                neighbors = node.connections.get(layer, set())
+                adjacency.extend(
+                    sorted(
+                        int(neighbor_id)
+                        for neighbor_id in neighbors
+                        if 0 <= neighbor_id < node_count and neighbor_id in self.nodes
+                    )
+                )
+
+            offsets[node_count] = len(adjacency)
+            graph_cache[layer] = (
+                offsets,
+                np.asarray(adjacency, dtype=np.int32),
+            )
+
+        self._cpp_graph_cache = graph_cache
+
     def insert(self, vector: np.ndarray, vector_id: int) -> None:
         """
         Insert a vector into the HNSW graph.
@@ -192,6 +298,8 @@ class HNSWIndex(VectorIndex):
         """
         # Note: We incrementally update graph cache during build for performance
         # Vectors_f64_cache remains valid during build
+        self._cpp_graph_cache = None
+        self._vectors_f32_cache = None
 
         # Assign layer for new node using exponential decay
         node_layer = self._assign_layer()
@@ -259,8 +367,17 @@ class HNSWIndex(VectorIndex):
 
                 # Prune neighbor's connections if it exceeds M
                 if len(neighbor_node.connections[lc]) > M:
-                    # Use Cython-optimized pruning if available
-                    if CYTHON_AVAILABLE and hnsw_core is not None:
+                    # Use native pruning when available to reduce build-time Python work.
+                    if CPP_AVAILABLE and hnsw_cpp is not None:
+                        pruned = hnsw_cpp.prune_connections(
+                            self._get_vectors_f32(),
+                            neighbor_id,
+                            list(neighbor_node.connections[lc]),
+                            M,
+                            self.metric,
+                        )
+                        neighbor_node.connections[lc] = set(pruned)
+                    elif CYTHON_AVAILABLE and hnsw_core is not None:
                         # Use cached float64 vectors (avoid repeated conversions)
                         pruned = hnsw_core.prune_connections(
                             self._get_vectors_f64(),
@@ -295,7 +412,7 @@ class HNSWIndex(VectorIndex):
             self.max_layer = node_layer
             self.entry_point = vector_id
 
-    def search(self, query: np.ndarray, k: int, ef: int = None) -> List[Tuple[int, float]]:
+    def search(self, query: np.ndarray, k: int, ef: int = None) -> list[tuple[int, float]]:
         """
         Search for k nearest neighbors.
 
@@ -343,8 +460,14 @@ class HNSWIndex(VectorIndex):
         return candidates[:k]
 
     def _search_layer(
-        self, query: np.ndarray, entry_points: List[int], num_closest: int, layer: int, use_cython: bool = True
-    ) -> List[Tuple[int, float]]:
+        self,
+        query: np.ndarray,
+        entry_points: list[int],
+        num_closest: int,
+        layer: int,
+        use_cython: bool = True,
+        use_cpp: bool = True,
+    ) -> list[tuple[int, float]]:
         """
         Search for nearest neighbors at a specific layer.
 
@@ -366,10 +489,31 @@ class HNSWIndex(VectorIndex):
             num_closest: Number of closest points to return (beam width)
             layer: Layer to search
             use_cython: Whether to use Cython optimization (False during build)
+            use_cpp: Whether to use C++ CSR search when the cache is available
 
         Returns:
             List of (vector_id, distance) tuples sorted by distance
         """
+        if (
+            use_cpp
+            and CPP_AVAILABLE
+            and hnsw_cpp is not None
+            and self._cpp_graph_cache is not None
+            and self._vectors_f32_cache is not None
+            and layer in self._cpp_graph_cache
+        ):
+            offsets, neighbors = self._cpp_graph_cache[layer]
+            query_f32 = np.ascontiguousarray(query, dtype=np.float32)
+            return hnsw_cpp.search_layer(
+                query=query_f32,
+                vectors=self._vectors_f32_cache,
+                offsets=offsets,
+                neighbors=neighbors,
+                entry_points=entry_points,
+                num_closest=num_closest,
+                metric=self.metric,
+            )
+
         # Use Cython-optimized search if available and cache is ready
         if use_cython and CYTHON_AVAILABLE and hnsw_core is not None and self._graph_connections_cache is not None and self._vectors_f64_cache is not None:
 
@@ -479,8 +623,8 @@ class HNSWIndex(VectorIndex):
         return result_list
 
     def _select_neighbors(
-        self, candidates: List[Tuple[int, float]], M: int
-    ) -> List[int]:
+        self, candidates: list[tuple[int, float]], M: int
+    ) -> list[int]:
         """
         Select M neighbors from candidates using simple heuristic.
 
@@ -542,6 +686,9 @@ class HNSWIndex(VectorIndex):
         # Check if vector exists
         if vector_id not in self.nodes:
             raise ValueError(f"Vector ID {vector_id} not found in index")
+
+        self._cpp_graph_cache = None
+        self._vectors_f32_cache = None
 
         # Remove all edges pointing TO this node from ALL nodes
         # Note: We must check all nodes, not just this node's neighbors,
@@ -673,3 +820,8 @@ class HNSWIndex(VectorIndex):
                 connections=connections
             )
             self.nodes[vid] = node
+
+        if self.vectors is not None and self.nodes and CYTHON_AVAILABLE and hnsw_core is not None:
+            self._build_cython_cache()
+        if self.vectors is not None and self.nodes and CPP_AVAILABLE and hnsw_cpp is not None:
+            self._build_cpp_cache()
