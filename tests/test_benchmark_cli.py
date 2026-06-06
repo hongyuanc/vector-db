@@ -46,6 +46,33 @@ def test_run_benchmark_suite_returns_structured_metrics():
     assert metrics["memory"]["graph"]["python_nodes"] > 0
     assert "python_graph_materialized" in metrics["memory"]["graph"]
     assert metrics["memory"]["graph"]["total_graph_mb"] > 0
+    assert set(metrics["persistence"]) == {"compact", "materialized"}
+    assert set(metrics["persistence"]["compact"]) == {
+        "available",
+        "save_time_seconds",
+        "load_time_seconds",
+        "file_size_mb",
+        "process_peak_rss_mb",
+        "loaded_graph",
+    }
+    assert set(metrics["persistence"]["materialized"]) == {
+        "available",
+        "save_time_seconds",
+        "load_time_seconds",
+        "file_size_mb",
+        "process_peak_rss_mb",
+        "loaded_graph",
+    }
+    assert metrics["persistence"]["materialized"]["available"] is True
+    assert metrics["persistence"]["materialized"]["save_time_seconds"] >= 0
+    assert metrics["persistence"]["materialized"]["load_time_seconds"] >= 0
+    assert metrics["persistence"]["materialized"]["loaded_graph"]["python_graph_materialized"] is True
+    if result["environment"]["cpp_available"]:
+        assert metrics["persistence"]["compact"]["available"] is True
+        assert metrics["persistence"]["compact"]["loaded_graph"]["python_graph_materialized"] is False
+        assert metrics["persistence"]["compact"]["loaded_graph"]["cpp_edges"] > 0
+    else:
+        assert metrics["persistence"]["compact"]["available"] is False
 
     assert result["environment"]["git_commit"]
     assert "python" in result["environment"]
@@ -102,3 +129,5 @@ def test_main_writes_json_and_markdown_reports(tmp_path):
     assert "Recall@3" in markdown
     assert "p99 Latency" in markdown
     assert "Graph Total" in markdown
+    assert "Compact Save Time" in markdown
+    assert "Materialized Save Time" in markdown

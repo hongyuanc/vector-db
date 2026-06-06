@@ -965,6 +965,8 @@ The JSON report includes:
 - search QPS and latency percentiles: p50, p95, p99, and average
 - recall@k against brute-force ground truth
 - vector/query memory estimates, graph memory estimates, and process peak RSS when available
+- compact CSR versus materialized Python graph save/load timing, file size,
+  loaded graph shape, and process peak RSS samples
 
 The Markdown report contains the same information in a compact table so each
 benchmark snapshot can be appended to this document or interview notes.
@@ -993,6 +995,35 @@ that can be compared across commits.
 
 This also keeps the project educational: every performance change can now be
 explained as a hypothesis, a code change, and a measured result.
+
+### Persistence Benchmark Update
+
+What was there before: the benchmark runner showed the memory shape of the graph
+after build/search, but it did not exercise `save()` or `load()`. After adding
+compact CSR persistence, that left an important gap: unit tests proved the format
+could reload without Python edge sets, but there was no repeatable measurement of
+save time, load time, file size, or loaded graph memory shape.
+
+What was implemented: `run_benchmark_suite()` now measures two persistence
+variants after search metrics are collected:
+
+- **Compact:** saves the index as built when `_cpp_graph_cache` is present and
+  `_python_graph_materialized` is false. Loading this file should keep graph
+  edges in CSR arrays and leave Python node connection sets empty.
+- **Materialized:** calls `materialize_python_graph()`, clears the CSR cache
+  before saving, and then loads through the legacy Python connection path. This
+  gives a baseline for the older memory shape where Python edge sets are present
+  after reload.
+
+Each variant records whether it was available, save/load seconds, `.npz` file
+size, process peak RSS sampled after load, and `_estimate_graph_memory()` for the
+loaded index.
+
+Why: the CSR persistence change was about preserving memory ownership across
+reload, not just making save/load pass. Measuring both persistence shapes in the
+same benchmark artifact makes that tradeoff visible and gives future work a
+stable way to check whether file format or graph ownership changes improve or
+regress persistence behavior.
 
 ### Next Steps
 
@@ -1139,8 +1170,8 @@ edge sets just to reach the same searchable C++ graph.
 
 ### Next Steps
 
-- Benchmark save/load time and peak RSS on SIFT1M 10k/100k now that compact CSR
-  persistence avoids Python graph reconstruction.
+- Run the updated persistence benchmark on SIFT1M 10k/100k and append the
+  measured compact-versus-materialized numbers.
 - Preserve or replace incremental `insert()` and delete semantics with a native
   mutable graph object if online updates remain a project goal.
 - Run the same C++ batch builder on SIFT1M 100k and update the ChromaDB

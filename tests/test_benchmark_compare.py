@@ -29,6 +29,20 @@ def test_compare_results_calculates_deltas_and_statuses():
                 "process_peak_rss_mb": 100.0,
                 "graph": {"total_graph_mb": 3.0},
             },
+            "persistence": {
+                "compact": {
+                    "save_time_seconds": 1.0,
+                    "load_time_seconds": 2.0,
+                    "file_size_mb": 4.0,
+                    "process_peak_rss_mb": 110.0,
+                },
+                "materialized": {
+                    "save_time_seconds": 3.0,
+                    "load_time_seconds": 4.0,
+                    "file_size_mb": 8.0,
+                    "process_peak_rss_mb": 130.0,
+                },
+            },
         }
     )
     candidate = _result(
@@ -42,6 +56,20 @@ def test_compare_results_calculates_deltas_and_statuses():
                 "vector_data_mb": 1.0,
                 "process_peak_rss_mb": 120.0,
                 "graph": {"total_graph_mb": 2.0},
+            },
+            "persistence": {
+                "compact": {
+                    "save_time_seconds": 0.5,
+                    "load_time_seconds": 1.5,
+                    "file_size_mb": 3.0,
+                    "process_peak_rss_mb": 105.0,
+                },
+                "materialized": {
+                    "save_time_seconds": 3.5,
+                    "load_time_seconds": 5.0,
+                    "file_size_mb": 9.0,
+                    "process_peak_rss_mb": 140.0,
+                },
             },
         }
     )
@@ -67,6 +95,10 @@ def test_compare_results_calculates_deltas_and_statuses():
     assert metrics["latency_ms.p95"]["status"] == "regressed"
     assert metrics["memory.graph.total_graph_mb"]["delta"] == -1.0
     assert metrics["memory.graph.total_graph_mb"]["status"] == "improved"
+    assert metrics["persistence.compact.save_time_seconds"]["delta"] == -0.5
+    assert metrics["persistence.compact.save_time_seconds"]["status"] == "improved"
+    assert metrics["persistence.materialized.file_size_mb"]["delta"] == 1.0
+    assert metrics["persistence.materialized.file_size_mb"]["status"] == "regressed"
 
 
 def test_main_writes_markdown_comparison(tmp_path):

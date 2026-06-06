@@ -175,8 +175,10 @@ python benchmarks/benchmark.py \
 The JSON output records the dataset, HNSW configuration, git commit, dirty
 worktree state, Python/NumPy versions, Cython availability, build time, QPS,
 p50/p95/p99 latency, recall@k, and memory estimates, including Python graph and
-C++ CSR graph storage. The Markdown output is intended for copying benchmark
-snapshots into the technical documentation.
+C++ CSR graph storage. It also records compact CSR versus materialized Python
+graph save/load timings, file sizes, loaded graph shape, and process peak RSS
+samples. The Markdown output is intended for copying benchmark snapshots into
+the technical documentation.
 
 Compare two JSON reports after an optimization:
 

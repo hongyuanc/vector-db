@@ -18,6 +18,7 @@ import json
 import platform
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -263,6 +264,62 @@ def _estimate_graph_memory(index: HNSWIndex) -> dict[str, int | float]:
     }
 
 
+def _unavailable_persistence_result() -> dict[str, Any]:
+    return {
+        "available": False,
+        "save_time_seconds": None,
+        "load_time_seconds": None,
+        "file_size_mb": None,
+        "process_peak_rss_mb": _peak_rss_mb(),
+        "loaded_graph": None,
+    }
+
+
+def _measure_persistence_variant(index: HNSWIndex, filepath: Path) -> dict[str, Any]:
+    save_start = time.perf_counter()
+    index.save(str(filepath))
+    save_time = time.perf_counter() - save_start
+
+    loaded = HNSWIndex()
+    load_start = time.perf_counter()
+    loaded.load(str(filepath))
+    load_time = time.perf_counter() - load_start
+
+    return {
+        "available": True,
+        "save_time_seconds": round(save_time, 6),
+        "load_time_seconds": round(load_time, 6),
+        "file_size_mb": round(filepath.stat().st_size / BYTES_PER_MIB, 4),
+        "process_peak_rss_mb": _peak_rss_mb(),
+        "loaded_graph": _estimate_graph_memory(loaded),
+    }
+
+
+def _benchmark_persistence(index: HNSWIndex) -> dict[str, Any]:
+    """Measure compact CSR persistence against a materialized Python graph save."""
+    compact_available = (
+        index._cpp_graph_cache is not None
+        and not index._python_graph_materialized
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        if compact_available:
+            compact = _measure_persistence_variant(index, tmp_path / "compact.npz")
+        else:
+            compact = _unavailable_persistence_result()
+
+        index.materialize_python_graph()
+        index._cpp_graph_cache = None
+        index._vectors_f32_cache = None
+        materialized = _measure_persistence_variant(index, tmp_path / "materialized.npz")
+
+    return {
+        "compact": compact,
+        "materialized": materialized,
+    }
+
+
 def _environment() -> dict[str, Any]:
     status = _git_output(["status", "--porcelain"])
     return {
@@ -349,10 +406,12 @@ def run_benchmark_suite(
     recall = _calculate_recall(predictions, ground_truth, effective_k)
 
     rss_after = _peak_rss_mb()
+    graph_memory = _estimate_graph_memory(index)
+    persistence = _benchmark_persistence(index)
     memory: dict[str, Any] = {
         "vector_data_mb": round(float(vectors.nbytes) / BYTES_PER_MIB, 2),
         "query_data_mb": round(float(queries.nbytes) / BYTES_PER_MIB, 2),
-        "graph": _estimate_graph_memory(index),
+        "graph": graph_memory,
         "process_peak_rss_mb": rss_after,
     }
     if rss_before is not None and rss_after is not None:
@@ -388,8 +447,17 @@ def run_benchmark_suite(
             "latency_ms": _percentiles(latencies_ms),
             "recall_at_k": round(recall, 6),
             "memory": memory,
+            "persistence": persistence,
         },
     }
+
+
+def _format_optional_seconds(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.6f}s"
+
+
+def _format_optional_mb(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.4f} MiB"
 
 
 def format_markdown_report(result: dict[str, Any]) -> str:
@@ -399,6 +467,9 @@ def format_markdown_report(result: dict[str, Any]) -> str:
     metrics = result["metrics"]
     latency = metrics["latency_ms"]
     memory = metrics["memory"]
+    persistence = metrics["persistence"]
+    compact = persistence["compact"]
+    materialized = persistence["materialized"]
     k = result["config"]["k"]
 
     return "\n".join(
@@ -449,6 +520,15 @@ def format_markdown_report(result: dict[str, Any]) -> str:
             f"| C++ CSR Edges | {memory['graph']['cpp_edges']} |",
             f"| Graph Total | {memory['graph']['total_graph_mb']:.4f} MiB |",
             f"| Process Peak RSS | {memory['process_peak_rss_mb']} MiB |",
+            f"| Compact Persistence Available | {compact['available']} |",
+            f"| Compact Save Time | {_format_optional_seconds(compact['save_time_seconds'])} |",
+            f"| Compact Load Time | {_format_optional_seconds(compact['load_time_seconds'])} |",
+            f"| Compact File Size | {_format_optional_mb(compact['file_size_mb'])} |",
+            f"| Compact Load Peak RSS | {_format_optional_mb(compact['process_peak_rss_mb'])} |",
+            f"| Materialized Save Time | {_format_optional_seconds(materialized['save_time_seconds'])} |",
+            f"| Materialized Load Time | {_format_optional_seconds(materialized['load_time_seconds'])} |",
+            f"| Materialized File Size | {_format_optional_mb(materialized['file_size_mb'])} |",
+            f"| Materialized Load Peak RSS | {_format_optional_mb(materialized['process_peak_rss_mb'])} |",
             "",
         ]
     )

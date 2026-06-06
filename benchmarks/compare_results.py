@@ -25,6 +25,16 @@ METRIC_SPECS = {
     "recall_at_k": {"higher_is_better": True},
     "memory.graph.total_graph_mb": {"higher_is_better": False},
     "memory.process_peak_rss_mb": {"higher_is_better": False},
+    "persistence.compact.save_time_seconds": {"higher_is_better": False},
+    "persistence.compact.load_time_seconds": {"higher_is_better": False},
+    "persistence.compact.file_size_mb": {"higher_is_better": False},
+    "persistence.compact.process_peak_rss_mb": {"higher_is_better": False},
+    "persistence.compact.loaded_graph.total_graph_mb": {"higher_is_better": False},
+    "persistence.materialized.save_time_seconds": {"higher_is_better": False},
+    "persistence.materialized.load_time_seconds": {"higher_is_better": False},
+    "persistence.materialized.file_size_mb": {"higher_is_better": False},
+    "persistence.materialized.process_peak_rss_mb": {"higher_is_better": False},
+    "persistence.materialized.loaded_graph.total_graph_mb": {"higher_is_better": False},
 }
 
 
