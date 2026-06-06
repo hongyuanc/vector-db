@@ -2,10 +2,12 @@
 Tests for HNSW index implementation.
 """
 
-import pytest
-import numpy as np
 import tempfile
 from pathlib import Path
+
+import numpy as np
+import pytest
+
 from src.index.hnsw import HNSWIndex, HNSWNode
 
 
@@ -686,6 +688,7 @@ class TestBuild:
 
         # Build index
         index.build(vectors)
+        index.materialize_python_graph()
 
         # All nodes should be connected at layer 0
         for i in range(len(vectors)):
@@ -765,6 +768,7 @@ class TestBuild:
         vectors = np.random.randn(20, 3).astype(np.float32)
 
         index_low_m.build(vectors)
+        index_low_m.materialize_python_graph()
 
         # Check that connections are limited by M
         for i in range(20):
@@ -807,6 +811,7 @@ class TestDelete:
         np.random.seed(42)
         vectors = np.random.randn(10, 3).astype(np.float32)
         index.build(vectors)
+        index.materialize_python_graph()
 
         # Note which nodes were connected to node 5
         node_5 = index.nodes[5]
@@ -961,7 +966,7 @@ class TestSaveLoad:
 
             # Results should be identical
             assert len(results1) == len(results2), "Should return same number of results"
-            for (vid1, dist1), (vid2, dist2) in zip(results1, results2):
+            for (vid1, dist1), (vid2, dist2) in zip(results1, results2, strict=True):
                 assert vid1 == vid2, f"Result IDs should match: {vid1} vs {vid2}"
                 assert abs(dist1 - dist2) < 1e-6, f"Distances should match: {dist1} vs {dist2}"
 
@@ -988,7 +993,7 @@ class TestSaveLoad:
             results = index2.search(query, k=5)
 
             # Cosine similarity should be in [0, 1] range (or [-1, 1] for negative)
-            for vid, dist in results:
+            for _vid, dist in results:
                 assert -1.0 <= dist <= 1.0, f"Cosine similarity should be in [-1, 1], got {dist}"
 
     def test_save_load_empty_index(self):
@@ -1020,6 +1025,7 @@ class TestSaveLoad:
             index1 = HNSWIndex(M=4, ef_construction=20, metric="euclidean")
             vectors = np.random.randn(10, 3).astype(np.float32)
             index1.build(vectors)
+            index1.materialize_python_graph()
 
             # Record graph structure
             original_structure = {}

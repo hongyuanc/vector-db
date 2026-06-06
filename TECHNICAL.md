@@ -1032,10 +1032,16 @@ primitives into native code:
   sorting for insertion-time neighbor pruning.
 - `hnsw_cpp.build_graph()` now owns batch HNSW construction for `HNSWIndex.build()`:
   it samples no randomness itself, but receives Python-sampled levels, builds
-  mutable adjacency in C++, and returns the completed graph to Python.
+  mutable adjacency in C++, and returns graph metadata plus CSR search layers to
+  Python.
 - The C++ builder also returns CSR search layers directly. `HNSWIndex.build()`
   now reuses those arrays instead of walking Python sets to rebuild the same
   C++ search cache after construction.
+- The C++ builder can skip Python connection-row output. `HNSWIndex.build()`
+  now keeps batch-built graph edges only in the compact CSR cache by default.
+- `HNSWIndex.materialize_python_graph()` lazily rebuilds Python `set`-based
+  connections from CSR when graph inspection, save, delete, or mutation needs
+  the older Python representation.
 
 This is not a full C++ rewrite. Python still owns:
 
@@ -1064,6 +1070,7 @@ SIFT1M 10k, `M=16`, `ef_construction=200`, `ef_search=50`, 100 queries:
 | C++ search + C++ pruning | 17.50s | 10,146.75 | 0.0977ms | 0.1450ms | 99.10% |
 | C++ batch build + C++ search | 2.46s | 11,138.39 | 0.0892ms | 0.1348ms | 99.10% |
 | C++ batch build + direct CSR cache | 2.65s | 10,041.38 | 0.0988ms | 0.1560ms | 99.10% |
+| C++ batch build + lazy Python graph | 2.43s | 9,999.63 | 0.0992ms | 0.1792ms | 99.10% |
 
 The C++ layer traversal improved QPS by about 4.7x and reduced p99 latency by
 about 79% at the same recall. Build time did not improve because graph
@@ -1105,12 +1112,19 @@ reported graph total was 47.0131 MiB. This makes the next ownership problem
 visible: most graph memory is in Python sets, not in the compact C++ search
 arrays.
 
+The lazy Python graph update removes those duplicate Python edge sets from the
+normal batch-build search path. On the same SIFT1M 10k benchmark, Python graph
+materialization was false, Python graph edges dropped from 482,450 to 0, and the
+reported graph total dropped from 47.0131 MiB to 3.9147 MiB. The remaining
+Python graph estimate was 1.4257 MiB for node metadata, while the C++ CSR cache
+still held 482,450 directed edges in 2.4890 MiB. Recall stayed at 99.10%.
+
 ### Next Steps
 
-- Keep the graph resident in C++ after build instead of copying it back into
-  Python sets for normal search-only workloads.
-- Preserve or replace incremental `insert()` semantics with a native mutable
-  graph object if online updates remain a project goal.
+- Store and load CSR graph layers directly so save/load can avoid mandatory
+  Python graph materialization.
+- Preserve or replace incremental `insert()` and delete semantics with a native
+  mutable graph object if online updates remain a project goal.
 - Run the same C++ batch builder on SIFT1M 100k and update the ChromaDB
   comparison using fresh numbers.
 

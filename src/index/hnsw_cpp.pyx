@@ -9,6 +9,7 @@ Cython wrapper for the C++ HNSW search primitives.
 
 import numpy as np
 cimport numpy as cnp
+from libcpp cimport bool
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 
@@ -71,7 +72,8 @@ cdef extern from "hnsw_cpp_core.hpp" namespace "vectordb":
         int n_levels,
         int max_connections,
         int ef_construction,
-        const string& metric
+        const string& metric,
+        bool include_connections
     ) except +
 
 
@@ -170,6 +172,7 @@ def build_graph(
     int max_connections,
     int ef_construction,
     str metric,
+    bint include_connections=True,
 ):
     """
     Build a complete HNSW graph in C++ and return Python-friendly graph rows.
@@ -193,6 +196,7 @@ def build_graph(
         max_connections,
         ef_construction,
         metric_cpp,
+        include_connections,
     )
 
     cdef Py_ssize_t i
@@ -208,12 +212,13 @@ def build_graph(
     for i in range(raw.levels.size()):
         output_levels.append(raw.levels[i])
 
-    for i in range(raw.connections.size()):
-        connection = raw.connections[i]
-        neighbors = []
-        for j in range(connection.neighbors.size()):
-            neighbors.append(connection.neighbors[j])
-        output_connections.append((connection.node_id, connection.layer, neighbors))
+    if include_connections:
+        for i in range(raw.connections.size()):
+            connection = raw.connections[i]
+            neighbors = []
+            for j in range(connection.neighbors.size()):
+                neighbors.append(connection.neighbors[j])
+            output_connections.append((connection.node_id, connection.layer, neighbors))
 
     for i in range(raw.layers.size()):
         csr_layer = raw.layers[i]

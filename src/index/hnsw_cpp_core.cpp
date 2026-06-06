@@ -432,7 +432,8 @@ BuildGraphResult build_graph(
     int n_levels,
     int max_connections,
     int ef_construction,
-    const std::string& metric
+    const std::string& metric,
+    bool include_connections
 ) {
     if (metric != "euclidean" && metric != "cosine") {
         throw std::invalid_argument("metric must be 'euclidean' or 'cosine'");
@@ -564,19 +565,21 @@ BuildGraphResult build_graph(
     result.entry_point = entry_point;
     result.max_layer = current_max_layer;
 
-    for (std::size_t node_id = 0; node_id < nodes.size(); ++node_id) {
-        const BuildNode& node = nodes[node_id];
-        for (std::size_t layer = 0; layer < node.connections.size(); ++layer) {
-            if (node.connections[layer].empty()) {
-                continue;
-            }
+    if (include_connections) {
+        for (std::size_t node_id = 0; node_id < nodes.size(); ++node_id) {
+            const BuildNode& node = nodes[node_id];
+            for (std::size_t layer = 0; layer < node.connections.size(); ++layer) {
+                if (node.connections[layer].empty()) {
+                    continue;
+                }
 
-            LayerConnection connection;
-            connection.node_id = static_cast<int>(node_id);
-            connection.layer = static_cast<int>(layer);
-            connection.neighbors = node.connections[layer];
-            std::sort(connection.neighbors.begin(), connection.neighbors.end());
-            result.connections.push_back(connection);
+                LayerConnection connection;
+                connection.node_id = static_cast<int>(node_id);
+                connection.layer = static_cast<int>(layer);
+                connection.neighbors = node.connections[layer];
+                std::sort(connection.neighbors.begin(), connection.neighbors.end());
+                result.connections.push_back(connection);
+            }
         }
     }
 

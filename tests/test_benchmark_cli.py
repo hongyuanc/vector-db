@@ -43,14 +43,20 @@ def test_run_benchmark_suite_returns_structured_metrics():
     assert metrics["latency_ms"]["p99"] >= metrics["latency_ms"]["p50"]
     assert "vector_data_mb" in metrics["memory"]
     assert "graph" in metrics["memory"]
-    assert metrics["memory"]["graph"]["python_edges"] > 0
-    assert metrics["memory"]["graph"]["cpp_edges"] > 0
+    assert metrics["memory"]["graph"]["python_nodes"] > 0
+    assert "python_graph_materialized" in metrics["memory"]["graph"]
     assert metrics["memory"]["graph"]["total_graph_mb"] > 0
 
     assert result["environment"]["git_commit"]
     assert "python" in result["environment"]
     assert "numpy" in result["environment"]
     assert "cpp_available" in result["environment"]
+    if result["environment"]["cpp_available"]:
+        assert metrics["memory"]["graph"]["python_edges"] == 0
+        assert metrics["memory"]["graph"]["cpp_edges"] > 0
+    else:
+        assert metrics["memory"]["graph"]["python_edges"] > 0
+        assert metrics["memory"]["graph"]["cpp_edges"] == 0
 
 
 def test_main_writes_json_and_markdown_reports(tmp_path):

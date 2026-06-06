@@ -64,7 +64,8 @@ BuildGraphResult build_graph(
     int n_levels,
     int max_connections,
     int ef_construction,
-    const std::string& metric
+    const std::string& metric,
+    bool include_connections
 );
 
 }  // namespace vectordb

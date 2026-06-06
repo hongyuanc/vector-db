@@ -129,6 +129,34 @@ def test_cpp_build_graph_returns_searchable_connections():
     assert layer_zero["offsets"][-1] == len(layer_zero["neighbors"])
 
 
+def test_cpp_build_graph_can_skip_connection_rows():
+    from src.index import hnsw_cpp
+
+    vectors = np.array(
+        [
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.2, 0.0],
+            [3.0, 3.0],
+            [3.1, 3.0],
+        ],
+        dtype=np.float32,
+    )
+    levels = np.array([0, 1, 0, 0, 0], dtype=np.int32)
+
+    graph = hnsw_cpp.build_graph(
+        vectors=vectors,
+        levels=levels,
+        max_connections=2,
+        ef_construction=4,
+        metric="euclidean",
+        include_connections=False,
+    )
+
+    assert graph["connections"] == []
+    assert graph["layers"][0]["neighbors"].size > 0
+
+
 def test_hnsw_build_uses_cpp_batch_builder_when_available(monkeypatch):
     import src.index.hnsw as hnsw_module
 
@@ -142,6 +170,7 @@ def test_hnsw_build_uses_cpp_batch_builder_when_available(monkeypatch):
             max_connections,
             ef_construction,
             metric,
+            include_connections=True,
         ):
             calls.append(
                 {
@@ -150,18 +179,14 @@ def test_hnsw_build_uses_cpp_batch_builder_when_available(monkeypatch):
                     "max_connections": max_connections,
                     "ef_construction": ef_construction,
                     "metric": metric,
+                    "include_connections": include_connections,
                 }
             )
             return {
                 "entry_point": 1,
                 "max_layer": 1,
                 "levels": [0, 1, 0],
-                "connections": [
-                    (0, 0, [1]),
-                    (1, 0, [0, 2]),
-                    (1, 1, [0]),
-                    (2, 0, [1]),
-                ],
+                "connections": [],
                 "layers": {
                     0: {
                         "offsets": np.array([0, 1, 3, 4], dtype=np.int32),
@@ -199,11 +224,16 @@ def test_hnsw_build_uses_cpp_batch_builder_when_available(monkeypatch):
             "max_connections": 2,
             "ef_construction": 8,
             "metric": "euclidean",
+            "include_connections": False,
         }
     ]
     assert index.entry_point == 1
     assert index.max_layer == 1
     assert index.nodes[1].layer == 1
+    assert index.nodes[1].connections == {}
+
+    index.materialize_python_graph()
+
     assert index.nodes[1].connections[0] == {0, 2}
     assert index.nodes[1].connections[1] == {0}
     assert 0 in index._cpp_graph_cache
@@ -222,15 +252,13 @@ def test_hnsw_build_reuses_cpp_builder_cache(monkeypatch):
             max_connections,
             ef_construction,
             metric,
+            include_connections=True,
         ):
             return {
                 "entry_point": 0,
                 "max_layer": 0,
                 "levels": [0, 0],
-                "connections": [
-                    (0, 0, [1]),
-                    (1, 0, [0]),
-                ],
+                "connections": [],
                 "layers": {
                     0: {
                         "offsets": np.array([0, 1, 2], dtype=np.int32),
@@ -260,6 +288,38 @@ def test_hnsw_build_reuses_cpp_builder_cache(monkeypatch):
 
     assert np.array_equal(index._cpp_graph_cache[0][0], np.array([0, 1, 2], dtype=np.int32))
     assert np.array_equal(index._cpp_graph_cache[0][1], np.array([1, 0], dtype=np.int32))
+
+
+def test_insert_after_cpp_batch_build_materializes_existing_graph(monkeypatch):
+    import src.index.hnsw as hnsw_module
+
+    if not hnsw_module.CPP_AVAILABLE:
+        pytest.skip("C++ extension is not available")
+
+    monkeypatch.setattr(HNSWIndex, "_assign_layer", lambda self: 0)
+
+    index = HNSWIndex(M=2, ef_construction=8, metric="euclidean")
+    vectors = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    index.build(vectors)
+
+    assert index._python_graph_materialized is False
+    assert index.nodes[1].connections == {}
+
+    extended_vectors = np.vstack([vectors, np.array([[3.0, 0.0]], dtype=np.float32)])
+    index.vectors = extended_vectors
+    index.insert(extended_vectors[3], vector_id=3)
+
+    assert index._python_graph_materialized is True
+    assert index._graph_connections_cache is not None
+    assert any(3 in neighbors for node in index.nodes.values() for neighbors in node.connections.values())
+    assert index.search(extended_vectors[3], k=1)[0][0] == 3
 
 
 def test_cpp_search_layer_matches_cosine_order():

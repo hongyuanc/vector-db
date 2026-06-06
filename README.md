@@ -207,9 +207,11 @@ The useful boundary was moving construction traversal and mutable adjacency
 together. The builder now also returns the CSR search cache directly, avoiding a
 post-build walk over Python sets to recreate adjacency arrays.
 
-The benchmark report now makes graph memory visible. On SIFT1M 10k, the Python
-graph estimate is about 44.5 MiB, while the C++ CSR search cache for the same
-directed edges is about 2.5 MiB.
+The batch build path now skips Python edge materialization for normal search-only
+workloads. On SIFT1M 10k, the benchmark reports zero Python graph edges, about
+1.4 MiB of Python node metadata, and about 2.5 MiB for the C++ CSR graph. Save,
+delete, and explicit graph inspection can still lazily rebuild Python connection
+sets from the CSR cache.
 
 ### Basic Performance Benchmarks
 

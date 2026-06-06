@@ -251,6 +251,7 @@ def _estimate_graph_memory(index: HNSWIndex) -> dict[str, int | float]:
 
     return {
         "python_nodes": len(index.nodes),
+        "python_graph_materialized": bool(index._python_graph_materialized),
         "python_layers": len(python_layers),
         "python_edges": python_edge_count,
         "python_graph_mb": round(python_bytes / BYTES_PER_MIB, 4),
@@ -441,6 +442,7 @@ def format_markdown_report(result: dict[str, Any]) -> str:
             f"| p99 Latency | {latency['p99']:.4f} ms |",
             f"| Recall@{k} | {metrics['recall_at_k']:.4f} |",
             f"| Vector Data | {memory['vector_data_mb']:.2f} MiB |",
+            f"| Python Graph Materialized | {memory['graph']['python_graph_materialized']} |",
             f"| Python Graph | {memory['graph']['python_graph_mb']:.4f} MiB |",
             f"| Python Graph Edges | {memory['graph']['python_edges']} |",
             f"| C++ CSR Graph | {memory['graph']['cpp_graph_mb']:.4f} MiB |",

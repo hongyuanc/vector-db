@@ -113,6 +113,7 @@ class HNSWIndex(VectorIndex):
         # Cached CSR graph connections for C++ search (built after index construction)
         self._cpp_graph_cache: dict = None
         self._vectors_f32_cache: np.ndarray = None
+        self._python_graph_materialized = True
 
     def _assign_layer(self) -> int:
         """
@@ -159,6 +160,7 @@ class HNSWIndex(VectorIndex):
         self._vectors_f64_cache = None
         self._cpp_graph_cache = None
         self._vectors_f32_cache = None
+        self._python_graph_materialized = True
 
         # Insert each vector into the graph
         total = len(vectors)
@@ -173,6 +175,7 @@ class HNSWIndex(VectorIndex):
                 self.M,
                 self.ef_construction,
                 self.metric,
+                include_connections=False,
             )
             self._load_cpp_build_result(graph)
             print(f"Progress: {total:,}/{total:,} vectors (100.0%)", flush=True)
@@ -180,7 +183,13 @@ class HNSWIndex(VectorIndex):
             self._build_with_python_insert(vectors)
 
         # Pre-build cache for Cython if available
-        if self.vectors is not None and self.nodes and CYTHON_AVAILABLE and hnsw_core is not None:
+        if (
+            self.vectors is not None
+            and self.nodes
+            and self._python_graph_materialized
+            and CYTHON_AVAILABLE
+            and hnsw_core is not None
+        ):
             self._build_cython_cache()
         if (
             self.vectors is not None
@@ -205,22 +214,64 @@ class HNSWIndex(VectorIndex):
                 print(f"Progress: {i+1:,}/{total:,} vectors ({progress:.1f}%)", flush=True)
 
     def _load_cpp_build_result(self, graph: dict) -> None:
-        """Load a C++ batch build result into the Python node representation."""
+        """Load a C++ batch build result without eagerly copying Python edges."""
         levels = graph["levels"]
         self.nodes = {
             vector_id: HNSWNode(vector_id=vector_id, layer=int(layer))
             for vector_id, layer in enumerate(levels)
         }
 
-        for node_id, layer, neighbors in graph["connections"]:
+        connections = graph.get("connections", [])
+        for node_id, layer, neighbors in connections:
             node = self.nodes[int(node_id)]
             node.connections[int(layer)] = {int(neighbor_id) for neighbor_id in neighbors}
 
         self._load_cpp_layers(graph.get("layers", {}))
+        self._python_graph_materialized = bool(connections) or not self._cpp_graph_cache
 
         entry_point = int(graph["entry_point"])
         self.entry_point = entry_point if entry_point >= 0 else None
         self.max_layer = int(graph["max_layer"])
+
+    def materialize_python_graph(self) -> None:
+        """Rebuild Python connection sets from the C++ CSR cache when needed."""
+        self._ensure_python_graph_materialized()
+
+    def _ensure_python_graph_materialized(self) -> None:
+        """Lazy compatibility path for inspection, persistence, and mutation."""
+        if self._python_graph_materialized:
+            return
+
+        if self._cpp_graph_cache is None:
+            self._python_graph_materialized = True
+            return
+
+        for node in self.nodes.values():
+            node.connections = {}
+
+        active_node_ids = set(self.nodes)
+        for layer, (offsets, neighbors) in self._cpp_graph_cache.items():
+            node_count = max(0, len(offsets) - 1)
+            for node_id in range(node_count):
+                node = self.nodes.get(node_id)
+                if node is None:
+                    continue
+
+                begin = int(offsets[node_id])
+                end = int(offsets[node_id + 1])
+                begin = max(0, min(begin, len(neighbors)))
+                end = max(begin, min(end, len(neighbors)))
+
+                neighbor_set = {
+                    int(neighbor_id)
+                    for neighbor_id in neighbors[begin:end]
+                    if int(neighbor_id) in active_node_ids
+                }
+                if neighbor_set:
+                    node.connections[int(layer)] = neighbor_set
+
+        self._python_graph_materialized = True
+        self._graph_connections_cache = None
 
     def _load_cpp_layers(self, layers: dict) -> None:
         """Load C++ builder CSR layers into the post-build search cache."""
@@ -238,6 +289,8 @@ class HNSWIndex(VectorIndex):
 
     def _build_cython_cache(self):
         """Build cached data structures for Cython-optimized search."""
+        self._ensure_python_graph_materialized()
+
         # Ensure vectors are cached as float64
         self._get_vectors_f64()
 
@@ -264,6 +317,8 @@ class HNSWIndex(VectorIndex):
 
     def _build_cpp_cache(self):
         """Build per-layer CSR adjacency arrays for C++-optimized search."""
+        self._ensure_python_graph_materialized()
+
         if not self.nodes:
             self._cpp_graph_cache = {}
             return
@@ -320,6 +375,8 @@ class HNSWIndex(VectorIndex):
         """
         # Note: We incrementally update graph cache during build for performance
         # Vectors_f64_cache remains valid during build
+        self._ensure_python_graph_materialized()
+        had_existing_nodes = bool(self.nodes)
         self._cpp_graph_cache = None
         self._vectors_f32_cache = None
 
@@ -333,7 +390,10 @@ class HNSWIndex(VectorIndex):
         # Initialize Cython caches if using Cython (for fast search during build)
         if CYTHON_AVAILABLE and hnsw_core is not None:
             if self._graph_connections_cache is None:
-                self._graph_connections_cache = {}
+                if had_existing_nodes:
+                    self._build_cython_cache()
+                else:
+                    self._graph_connections_cache = {}
             if self._vectors_f64_cache is None:
                 self._get_vectors_f64()
 
@@ -536,6 +596,11 @@ class HNSWIndex(VectorIndex):
                 metric=self.metric,
             )
 
+        if not self._python_graph_materialized:
+            self._ensure_python_graph_materialized()
+            if use_cython and CYTHON_AVAILABLE and hnsw_core is not None:
+                self._build_cython_cache()
+
         # Use Cython-optimized search if available and cache is ready
         if use_cython and CYTHON_AVAILABLE and hnsw_core is not None and self._graph_connections_cache is not None and self._vectors_f64_cache is not None:
 
@@ -709,6 +774,7 @@ class HNSWIndex(VectorIndex):
         if vector_id not in self.nodes:
             raise ValueError(f"Vector ID {vector_id} not found in index")
 
+        self._ensure_python_graph_materialized()
         self._cpp_graph_cache = None
         self._vectors_f32_cache = None
 
@@ -753,6 +819,8 @@ class HNSWIndex(VectorIndex):
             >>> new_index.load("my_index.npz")
         """
         import pickle
+
+        self._ensure_python_graph_materialized()
 
         # Serialize graph structure using pickle
         # We need to convert the nodes dict to a serializable format
@@ -826,6 +894,10 @@ class HNSWIndex(VectorIndex):
         # Restore vectors
         vectors_data = data['vectors']
         self.vectors = vectors_data if len(vectors_data) > 0 else None
+        self._graph_connections_cache = None
+        self._vectors_f64_cache = None
+        self._cpp_graph_cache = None
+        self._vectors_f32_cache = None
 
         # Restore graph structure
         nodes_data = pickle.loads(data['nodes'].tobytes())
@@ -842,6 +914,8 @@ class HNSWIndex(VectorIndex):
                 connections=connections
             )
             self.nodes[vid] = node
+
+        self._python_graph_materialized = True
 
         if self.vectors is not None and self.nodes and CYTHON_AVAILABLE and hnsw_core is not None:
             self._build_cython_cache()
