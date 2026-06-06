@@ -287,6 +287,47 @@ class HNSWIndex(VectorIndex):
             for layer, layer_data in layers.items()
         }
 
+    def _collect_cpp_layer_arrays_for_save(self) -> dict[str, np.ndarray]:
+        """Return CSR layer arrays in a direct npz-friendly shape."""
+        if not self._cpp_graph_cache:
+            return {"csr_layers": np.array([], dtype=np.int32)}
+
+        csr_arrays = {}
+        layers = sorted(int(layer) for layer in self._cpp_graph_cache)
+        csr_arrays["csr_layers"] = np.asarray(layers, dtype=np.int32)
+
+        for layer in layers:
+            offsets, neighbors = self._cpp_graph_cache[layer]
+            csr_arrays[f"csr_offsets_{layer}"] = np.ascontiguousarray(
+                offsets, dtype=np.int32
+            )
+            csr_arrays[f"csr_neighbors_{layer}"] = np.ascontiguousarray(
+                neighbors, dtype=np.int32
+            )
+
+        return csr_arrays
+
+    def _load_cpp_layers_from_npz(self, data) -> None:
+        """Restore CSR layer arrays saved directly in the index npz."""
+        if "csr_layers" not in data.files:
+            self._cpp_graph_cache = None
+            return
+
+        graph_cache = {}
+        for layer_value in data["csr_layers"]:
+            layer = int(layer_value)
+            offsets_key = f"csr_offsets_{layer}"
+            neighbors_key = f"csr_neighbors_{layer}"
+            if offsets_key not in data.files or neighbors_key not in data.files:
+                raise ValueError(f"Missing CSR arrays for HNSW layer {layer}")
+
+            graph_cache[layer] = (
+                np.ascontiguousarray(data[offsets_key], dtype=np.int32),
+                np.ascontiguousarray(data[neighbors_key], dtype=np.int32),
+            )
+
+        self._cpp_graph_cache = graph_cache if graph_cache else None
+
     def _build_cython_cache(self):
         """Build cached data structures for Cython-optimized search."""
         self._ensure_python_graph_materialized()
@@ -820,7 +861,17 @@ class HNSWIndex(VectorIndex):
         """
         import pickle
 
-        self._ensure_python_graph_materialized()
+        has_compact_cpp_graph = (
+            self._cpp_graph_cache is not None
+            and not self._python_graph_materialized
+        )
+        if not has_compact_cpp_graph:
+            self._ensure_python_graph_materialized()
+
+        node_ids = np.asarray(sorted(self.nodes), dtype=np.int64)
+        node_layers = np.asarray(
+            [self.nodes[int(vid)].layer for vid in node_ids], dtype=np.int32
+        )
 
         # Serialize graph structure using pickle
         # We need to convert the nodes dict to a serializable format
@@ -837,21 +888,28 @@ class HNSWIndex(VectorIndex):
             }
 
         # Save everything to .npz file
-        np.savez(
-            filepath,
+        save_data = {
+            "format_version": np.array(2, dtype=np.int16),
             # Graph structure
-            nodes=pickle.dumps(nodes_data),
-            entry_point=self.entry_point if self.entry_point is not None else -1,
-            max_layer=self.max_layer,
+            "nodes": pickle.dumps(nodes_data),
+            "node_ids": node_ids,
+            "node_layers": node_layers,
+            "python_graph_materialized": np.array(
+                self._python_graph_materialized, dtype=np.bool_
+            ),
+            "entry_point": self.entry_point if self.entry_point is not None else -1,
+            "max_layer": self.max_layer,
             # Parameters
-            M=self.M,
-            ef_construction=self.ef_construction,
-            ef_search=self.ef_search,
-            ml=self.ml,
-            metric=self.metric,
+            "M": self.M,
+            "ef_construction": self.ef_construction,
+            "ef_search": self.ef_search,
+            "ml": self.ml,
+            "metric": self.metric,
             # Vector data
-            vectors=self.vectors if self.vectors is not None else np.array([]),
-        )
+            "vectors": self.vectors if self.vectors is not None else np.array([]),
+        }
+        save_data.update(self._collect_cpp_layer_arrays_for_save())
+        np.savez(filepath, **save_data)
 
     def load(self, filepath: str) -> None:
         """
@@ -899,25 +957,60 @@ class HNSWIndex(VectorIndex):
         self._cpp_graph_cache = None
         self._vectors_f32_cache = None
 
-        # Restore graph structure
-        nodes_data = pickle.loads(data['nodes'].tobytes())
+        self._load_cpp_layers_from_npz(data)
+
+        # Restore graph structure. New files store node IDs/layers directly so
+        # compact CSR loads do not need Python edge sets at all.
+        saved_python_graph_materialized = bool(
+            data["python_graph_materialized"].item()
+        ) if "python_graph_materialized" in data.files else True
+
         self.nodes = {}
-        for vid, node_dict in nodes_data.items():
-            # Convert lists back to sets
-            connections = {
-                layer: set(neighbors)
-                for layer, neighbors in node_dict['connections'].items()
-            }
-            node = HNSWNode(
-                vector_id=node_dict['vector_id'],
-                layer=node_dict['layer'],
-                connections=connections
-            )
-            self.nodes[vid] = node
+        if (
+            "node_ids" in data.files
+            and "node_layers" in data.files
+            and not saved_python_graph_materialized
+        ):
+            for vid, layer in zip(data["node_ids"], data["node_layers"], strict=True):
+                vector_id = int(vid)
+                self.nodes[vector_id] = HNSWNode(
+                    vector_id=vector_id,
+                    layer=int(layer),
+                )
+        else:
+            nodes_data = pickle.loads(data['nodes'].tobytes())
+            for vid, node_dict in nodes_data.items():
+                # Convert lists back to sets
+                connections = {
+                    layer: set(neighbors)
+                    for layer, neighbors in node_dict['connections'].items()
+                }
+                node = HNSWNode(
+                    vector_id=node_dict['vector_id'],
+                    layer=node_dict['layer'],
+                    connections=connections
+                )
+                self.nodes[vid] = node
 
-        self._python_graph_materialized = True
+        self._python_graph_materialized = (
+            saved_python_graph_materialized or self._cpp_graph_cache is None
+        )
 
-        if self.vectors is not None and self.nodes and CYTHON_AVAILABLE and hnsw_core is not None:
+        if self.vectors is not None and self._cpp_graph_cache is not None:
+            self._get_vectors_f32()
+        if (
+            self._python_graph_materialized
+            and self.vectors is not None
+            and self.nodes
+            and CYTHON_AVAILABLE
+            and hnsw_core is not None
+        ):
             self._build_cython_cache()
-        if self.vectors is not None and self.nodes and CPP_AVAILABLE and hnsw_cpp is not None:
+        if (
+            self.vectors is not None
+            and self.nodes
+            and CPP_AVAILABLE
+            and hnsw_cpp is not None
+            and self._cpp_graph_cache is None
+        ):
             self._build_cpp_cache()

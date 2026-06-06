@@ -1119,10 +1119,28 @@ reported graph total dropped from 47.0131 MiB to 3.9147 MiB. The remaining
 Python graph estimate was 1.4257 MiB for node metadata, while the C++ CSR cache
 still held 482,450 directed edges in 2.4890 MiB. Recall stayed at 99.10%.
 
+The CSR persistence update keeps that compact memory shape across save/load.
+Previously, `HNSWIndex.save()` always called
+`_ensure_python_graph_materialized()`, so saving a compact C++ batch-built graph
+rebuilt Python `set` edges before writing the index. Loading then restored those
+pickled Python connections and rebuilt the C++ cache from them. The new file
+format stores node identity/layer metadata separately from the graph edges and
+writes each CSR layer directly as `csr_offsets_<layer>` and
+`csr_neighbors_<layer>` arrays. A compact save records
+`python_graph_materialized=false`; load uses the direct CSR arrays to restore
+`_cpp_graph_cache`, keeps node `connections` empty, and initializes the float32
+vector cache needed by C++ search. Materialized and legacy files still load
+through the existing pickled Python graph path.
+
+This matters because persistence should not undo the memory ownership win from
+lazy Python graph materialization. Reloading an index can now keep graph edges in
+compact arrays instead of temporarily or permanently reconstructing the Python
+edge sets just to reach the same searchable C++ graph.
+
 ### Next Steps
 
-- Store and load CSR graph layers directly so save/load can avoid mandatory
-  Python graph materialization.
+- Benchmark save/load time and peak RSS on SIFT1M 10k/100k now that compact CSR
+  persistence avoids Python graph reconstruction.
 - Preserve or replace incremental `insert()` and delete semantics with a native
   mutable graph object if online updates remain a project goal.
 - Run the same C++ batch builder on SIFT1M 100k and update the ChromaDB

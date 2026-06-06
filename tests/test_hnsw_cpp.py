@@ -290,6 +290,52 @@ def test_hnsw_build_reuses_cpp_builder_cache(monkeypatch):
     assert np.array_equal(index._cpp_graph_cache[0][1], np.array([1, 0], dtype=np.int32))
 
 
+def test_save_load_preserves_compact_cpp_graph_without_materializing(monkeypatch, tmp_path):
+    def fail_materialize(self):
+        raise AssertionError("save/load should keep compact CSR graph shape")
+
+    vectors = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    offsets = np.array([0, 1, 3, 4], dtype=np.int32)
+    neighbors = np.array([1, 0, 2, 1], dtype=np.int32)
+
+    index = HNSWIndex(M=2, ef_construction=8, metric="euclidean")
+    index.vectors = vectors
+    index.nodes = {
+        0: HNSWNode(vector_id=0, layer=0),
+        1: HNSWNode(vector_id=1, layer=0),
+        2: HNSWNode(vector_id=2, layer=0),
+    }
+    index.entry_point = 0
+    index.max_layer = 0
+    index._cpp_graph_cache = {0: (offsets, neighbors)}
+    index._vectors_f32_cache = vectors
+    index._python_graph_materialized = False
+
+    monkeypatch.setattr(HNSWIndex, "_ensure_python_graph_materialized", fail_materialize)
+
+    filepath = tmp_path / "index.npz"
+    index.save(str(filepath))
+
+    assert index._python_graph_materialized is False
+    assert all(node.connections == {} for node in index.nodes.values())
+
+    loaded = HNSWIndex()
+    loaded.load(str(filepath))
+
+    assert loaded._python_graph_materialized is False
+    assert all(node.connections == {} for node in loaded.nodes.values())
+    assert loaded._vectors_f32_cache is not None
+    assert np.array_equal(loaded._cpp_graph_cache[0][0], offsets)
+    assert np.array_equal(loaded._cpp_graph_cache[0][1], neighbors)
+
+
 def test_insert_after_cpp_batch_build_materializes_existing_graph(monkeypatch):
     import src.index.hnsw as hnsw_module
 
