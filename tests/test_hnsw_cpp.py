@@ -290,6 +290,78 @@ def test_hnsw_build_reuses_cpp_builder_cache(monkeypatch):
     assert np.array_equal(index._cpp_graph_cache[0][1], np.array([1, 0], dtype=np.int32))
 
 
+def test_hnsw_search_batch_uses_cpp_batch_cache(monkeypatch):
+    import src.index.hnsw as hnsw_module
+
+    calls = []
+
+    class FakeCppModule:
+        def search_batch(
+            self,
+            queries,
+            vectors,
+            layers,
+            entry_point,
+            max_layer,
+            k,
+            ef,
+            metric,
+        ):
+            calls.append(
+                {
+                    "queries_shape": queries.shape,
+                    "vectors_dtype": vectors.dtype,
+                    "layers": sorted(layers),
+                    "entry_point": entry_point,
+                    "max_layer": max_layer,
+                    "k": k,
+                    "ef": ef,
+                    "metric": metric,
+                }
+            )
+            return [[(0, 0.0), (1, 1.0)], [(1, 0.0), (0, 1.0)]]
+
+    monkeypatch.setattr(hnsw_module, "CPP_AVAILABLE", True)
+    monkeypatch.setattr(hnsw_module, "hnsw_cpp", FakeCppModule())
+
+    index = HNSWIndex(M=2, ef_search=20, metric="euclidean")
+    index.vectors = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    index._vectors_f32_cache = np.ascontiguousarray(index.vectors, dtype=np.float32)
+    index._cpp_graph_cache = {
+        0: (
+            np.array([0, 1, 2], dtype=np.int32),
+            np.array([1, 0], dtype=np.int32),
+        )
+    }
+    index._python_graph_materialized = False
+    index.entry_point = 0
+    index.max_layer = 0
+
+    queries = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32)
+
+    results = index.search_batch(queries, k=2, ef=7)
+
+    assert results == [[(0, 0.0), (1, 1.0)], [(1, 0.0), (0, 1.0)]]
+    assert calls == [
+        {
+            "queries_shape": (2, 2),
+            "vectors_dtype": np.dtype("float32"),
+            "layers": [0],
+            "entry_point": 0,
+            "max_layer": 0,
+            "k": 2,
+            "ef": 7,
+            "metric": "euclidean",
+        }
+    ]
+
+
 def test_save_load_preserves_compact_cpp_graph_without_materializing(monkeypatch, tmp_path):
     def fail_materialize(self):
         raise AssertionError("save/load should keep compact CSR graph shape")
@@ -520,3 +592,53 @@ def test_hnsw_layer_search_can_use_cpp_cache():
     assert [vector_id for vector_id, _distance in cpp_results] == [
         vector_id for vector_id, _distance in python_results
     ]
+
+
+def test_cpp_search_batch_matches_repeated_index_search():
+    from src.index import hnsw_cpp
+
+    index = HNSWIndex(M=2, ef_construction=8, ef_search=8, metric="euclidean")
+    vectors = np.array(
+        [
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.2, 0.0],
+            [2.0, 2.0],
+            [2.1, 2.0],
+            [2.2, 2.0],
+        ],
+        dtype=np.float32,
+    )
+    queries = np.array(
+        [
+            [0.05, 0.0],
+            [2.15, 2.0],
+            [1.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+
+    np.random.seed(7)
+    index.build(vectors)
+
+    repeated_results = [index.search(query, k=3, ef=8) for query in queries]
+    batch_results = hnsw_cpp.search_batch(
+        queries=queries,
+        vectors=index._vectors_f32_cache,
+        layers=index._cpp_graph_cache,
+        entry_point=index.entry_point,
+        max_layer=index.max_layer,
+        k=3,
+        ef=8,
+        metric=index.metric,
+    )
+
+    assert len(batch_results) == len(repeated_results)
+    for batch, repeated in zip(batch_results, repeated_results):
+        assert [vector_id for vector_id, _distance in batch] == [
+            vector_id for vector_id, _distance in repeated
+        ]
+        assert [distance for _vector_id, distance in batch] == pytest.approx(
+            [distance for _vector_id, distance in repeated],
+            abs=1e-6,
+        )

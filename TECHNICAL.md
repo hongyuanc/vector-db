@@ -1216,8 +1216,17 @@ for the current graph shape. This keeps the project honest about the current
 tradeoff: batch-built indexes are compact for build/search/save/load, while
 online mutation remains supported through the older materialized Python graph.
 
-The 100k ChromaDB comparison was refreshed again after adding
-`HNSWIndex.search_batch()` as an explicit batch-query API boundary. This used
+The 100k ChromaDB comparison was refreshed again after moving
+`HNSWIndex.search_batch()` from a Python loop over `search()` into a native
+C++/Cython compact-CSR batch path. What was there before: callers had a batch
+method, but it still performed one full Python-level search per query. What was
+implemented: `hnsw_cpp.search_batch()` now receives the query matrix, vector
+matrix, CSR layer views, entry point, max layer, `k`, and `ef`, then performs
+the full top-down HNSW traversal for each query inside C++. The Python method
+uses this path only when the compact CSR cache is complete, and keeps the
+existing repeated-search fallback for other graph shapes.
+
+This used
 `tests/benchmarks/test_chromadb_comparison.py::TestChromaDBComparison::test_chromadb_vs_ours_100k`
 on SIFT1M 100k with `M=16`, `ef_construction=200`, `ef_search=100`, and 100
 queries. The benchmark now writes structured output to
@@ -1226,17 +1235,23 @@ to `benchmarks/results/sift1m-100k-chromadb-comparison.md`.
 
 | System | Build Time | Batch QPS | Batch Avg Latency | Single p99 | Recall@10 |
 |--------|-----------:|----------:|------------------:|-----------:|----------:|
-| Our HNSW C++/CSR | 45.96s | 3,921.1 | 0.2550ms | 0.8460ms | 98.20% |
-| ChromaDB | 4.33s | 6,740.3 | 0.1484ms | 0.4923ms | 99.80% |
+| Our HNSW C++/CSR | 49.79s | 4,266.4 | 0.2344ms | 1.0822ms | 98.50% |
+| ChromaDB | 4.83s | 6,476.6 | 0.1544ms | 0.5752ms | 99.70% |
 
-Compared with ChromaDB, the current implementation is still about 10.6x slower
-to build and about 1.7x slower on both batch average latency and single-query
-p99 latency at this scale. The explicit `search_batch()` method improved the
-benchmark boundary and gives future search work one stable call site, but today
-it still delegates to `search()` one query at a time. Therefore the remaining
-gap is not solved by Python call-site cleanup alone. The next useful
-performance work should move real batch traversal and/or distance computation
-inside the C++ layer, then remeasure against the same JSON artifact schema.
+Compared with the previous batch-boundary run, our batch QPS improved from
+3,921.1 to 4,266.4, about an 8.8% gain, and batch average latency improved from
+0.2550ms to 0.2344ms. This confirms that removing Python's per-query full-search
+loop is useful, but it is not enough to match ChromaDB. Compared with ChromaDB,
+the current implementation is still about 10.3x slower to build and about 1.5x
+slower on batch average latency at this scale. Single-query p99 is not expected
+to improve from this change because single `search()` still uses the existing
+layer-level path; the p99 value also has benchmark noise at only 100 measured
+queries.
+
+The next useful performance work is deeper than the batch call boundary:
+optimize the C++ layer traversal itself, reduce per-layer visited allocation, or
+vectorize distance computation. Those changes should be measured against the
+same JSON artifact schema.
 
 ### Next Steps
 

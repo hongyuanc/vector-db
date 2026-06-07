@@ -22,6 +22,14 @@ struct CsrLayer {
     std::vector<int> neighbors;
 };
 
+struct CsrLayerView {
+    int layer;
+    const int* offsets;
+    int offsets_len;
+    const int* neighbors;
+    int neighbors_len;
+};
+
 struct BuildGraphResult {
     int entry_point;
     int max_layer;
@@ -42,6 +50,21 @@ std::vector<SearchResult> search_layer(
     const int* entry_points,
     int n_entry_points,
     int num_closest,
+    const std::string& metric
+);
+
+std::vector<std::vector<SearchResult>> search_batch(
+    const float* queries,
+    int n_queries,
+    const float* vectors,
+    int n_vectors,
+    int dimension,
+    const CsrLayerView* layers,
+    int n_layers,
+    int entry_point,
+    int max_layer,
+    int k,
+    int ef,
     const std::string& metric
 );
 

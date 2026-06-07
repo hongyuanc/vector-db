@@ -638,8 +638,34 @@ class HNSWIndex(VectorIndex):
             raise ValueError("queries must be a 2D array shaped (n_queries, dimension)")
         if query_array.shape[0] == 0:
             return []
+        if k <= 0:
+            return [[] for _query in range(query_array.shape[0])]
         if self.entry_point is None:
             return [[] for _query in range(query_array.shape[0])]
+
+        if ef is None:
+            ef = self.ef_search
+        ef = max(ef, k)
+
+        if (
+            CPP_AVAILABLE
+            and hnsw_cpp is not None
+            and hasattr(hnsw_cpp, "search_batch")
+            and self._cpp_graph_cache is not None
+            and self._vectors_f32_cache is not None
+            and all(layer in self._cpp_graph_cache for layer in range(self.max_layer + 1))
+        ):
+            query_array = np.ascontiguousarray(query_array, dtype=np.float32)
+            return hnsw_cpp.search_batch(
+                queries=query_array,
+                vectors=self._vectors_f32_cache,
+                layers=self._cpp_graph_cache,
+                entry_point=self.entry_point,
+                max_layer=self.max_layer,
+                k=k,
+                ef=ef,
+                metric=self.metric,
+            )
 
         return [self.search(query, k=k, ef=ef) for query in query_array]
 

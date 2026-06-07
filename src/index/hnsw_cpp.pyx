@@ -31,6 +31,13 @@ cdef extern from "hnsw_cpp_core.hpp" namespace "vectordb":
         vector[int] offsets
         vector[int] neighbors
 
+    cdef cppclass CppCsrLayerView "vectordb::CsrLayerView":
+        int layer
+        const int* offsets
+        int offsets_len
+        const int* neighbors
+        int neighbors_len
+
     cdef cppclass CppBuildGraphResult "vectordb::BuildGraphResult":
         int entry_point
         int max_layer
@@ -50,6 +57,21 @@ cdef extern from "hnsw_cpp_core.hpp" namespace "vectordb":
         const int* entry_points,
         int n_entry_points,
         int num_closest,
+        const string& metric
+    ) except +
+
+    vector[vector[CppSearchResult]] cpp_search_batch "vectordb::search_batch"(
+        const float* queries,
+        int n_queries,
+        const float* vectors,
+        int n_vectors,
+        int dimension,
+        const CppCsrLayerView* layers,
+        int n_layers,
+        int entry_point,
+        int max_layer,
+        int k,
+        int ef,
         const string& metric
     ) except +
 
@@ -127,6 +149,82 @@ def search_layer(
         results.append((raw[i].id, raw[i].distance))
 
     return results
+
+
+def search_batch(
+    queries,
+    vectors,
+    layers,
+    int entry_point,
+    int max_layer,
+    int k,
+    int ef,
+    str metric,
+):
+    """
+    Search a compact CSR HNSW index for a batch of query vectors.
+    """
+    cdef cnp.ndarray[cnp.float32_t, ndim=2, mode="c"] queries_arr = np.ascontiguousarray(
+        queries, dtype=np.float32
+    )
+    cdef cnp.ndarray[cnp.float32_t, ndim=2, mode="c"] vectors_arr = np.ascontiguousarray(
+        vectors, dtype=np.float32
+    )
+    if queries_arr.shape[1] != vectors_arr.shape[1]:
+        raise ValueError("queries dimension must match vectors dimension")
+
+    cdef vector[CppCsrLayerView] layer_views
+    cdef CppCsrLayerView layer_view
+    cdef list layer_arrays = []
+    cdef object layer
+    cdef object layer_data
+    cdef cnp.ndarray[cnp.int32_t, ndim=1, mode="c"] offsets_arr
+    cdef cnp.ndarray[cnp.int32_t, ndim=1, mode="c"] neighbors_arr
+
+    for layer in sorted(layers):
+        layer_data = layers[layer]
+        offsets_arr = np.ascontiguousarray(layer_data[0], dtype=np.int32)
+        neighbors_arr = np.ascontiguousarray(layer_data[1], dtype=np.int32)
+        layer_arrays.append((offsets_arr, neighbors_arr))
+
+        layer_view.layer = <int> layer
+        layer_view.offsets = <const int*> offsets_arr.data
+        layer_view.offsets_len = <int> offsets_arr.shape[0]
+        layer_view.neighbors = <const int*> neighbors_arr.data
+        layer_view.neighbors_len = <int> neighbors_arr.shape[0]
+        layer_views.push_back(layer_view)
+
+    cdef const CppCsrLayerView* layer_ptr = NULL
+    if layer_views.size() > 0:
+        layer_ptr = &layer_views[0]
+
+    cdef string metric_cpp = metric.encode("utf-8")
+    cdef vector[vector[CppSearchResult]] raw = cpp_search_batch(
+        <const float*> queries_arr.data,
+        <int> queries_arr.shape[0],
+        <const float*> vectors_arr.data,
+        <int> vectors_arr.shape[0],
+        <int> vectors_arr.shape[1],
+        layer_ptr,
+        <int> layer_views.size(),
+        entry_point,
+        max_layer,
+        k,
+        ef,
+        metric_cpp,
+    )
+
+    cdef Py_ssize_t i
+    cdef Py_ssize_t j
+    cdef list output = []
+    cdef list query_results
+    for i in range(raw.size()):
+        query_results = []
+        for j in range(raw[i].size()):
+            query_results.append((raw[i][j].id, raw[i][j].distance))
+        output.append(query_results)
+
+    return output
 
 
 def prune_connections(

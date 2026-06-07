@@ -363,6 +363,117 @@ std::vector<SearchResult> search_layer(
     return output;
 }
 
+std::vector<std::vector<SearchResult>> search_batch(
+    const float* queries,
+    int n_queries,
+    const float* vectors,
+    int n_vectors,
+    int dimension,
+    const CsrLayerView* layers,
+    int n_layers,
+    int entry_point,
+    int max_layer,
+    int k,
+    int ef,
+    const std::string& metric
+) {
+    if (metric != "euclidean" && metric != "cosine") {
+        throw std::invalid_argument("metric must be 'euclidean' or 'cosine'");
+    }
+
+    std::vector<std::vector<SearchResult>> output;
+    if (n_queries > 0) {
+        output.reserve(static_cast<std::size_t>(n_queries));
+    }
+
+    if (
+        queries == nullptr ||
+        vectors == nullptr ||
+        layers == nullptr ||
+        n_queries <= 0 ||
+        n_vectors <= 0 ||
+        dimension <= 0 ||
+        n_layers <= 0 ||
+        entry_point < 0 ||
+        entry_point >= n_vectors ||
+        max_layer < 0 ||
+        k <= 0
+    ) {
+        for (int query_index = 0; query_index < n_queries; ++query_index) {
+            output.push_back({});
+        }
+        return output;
+    }
+
+    const int beam_width = std::max(ef, k);
+    std::vector<const CsrLayerView*> layer_by_number(static_cast<std::size_t>(max_layer + 1), nullptr);
+    for (int layer_index = 0; layer_index < n_layers; ++layer_index) {
+        const CsrLayerView& layer = layers[layer_index];
+        if (layer.layer >= 0 && layer.layer <= max_layer) {
+            layer_by_number[static_cast<std::size_t>(layer.layer)] = &layer;
+        }
+    }
+
+    for (int query_index = 0; query_index < n_queries; ++query_index) {
+        const float* query = queries + (static_cast<std::size_t>(query_index) * dimension);
+        std::vector<int> nearest;
+        nearest.push_back(entry_point);
+
+        for (int layer = max_layer; layer > 0; --layer) {
+            const CsrLayerView* layer_view = layer_by_number[static_cast<std::size_t>(layer)];
+            if (layer_view == nullptr) {
+                continue;
+            }
+
+            const std::vector<SearchResult> candidates = search_layer(
+                query,
+                vectors,
+                n_vectors,
+                dimension,
+                layer_view->offsets,
+                layer_view->offsets_len,
+                layer_view->neighbors,
+                layer_view->neighbors_len,
+                nearest.data(),
+                static_cast<int>(nearest.size()),
+                1,
+                metric
+            );
+            if (!candidates.empty()) {
+                nearest.clear();
+                nearest.push_back(candidates[0].id);
+            }
+        }
+
+        const CsrLayerView* base_layer = layer_by_number[0];
+        if (base_layer == nullptr) {
+            output.push_back({});
+            continue;
+        }
+
+        std::vector<SearchResult> candidates = search_layer(
+            query,
+            vectors,
+            n_vectors,
+            dimension,
+            base_layer->offsets,
+            base_layer->offsets_len,
+            base_layer->neighbors,
+            base_layer->neighbors_len,
+            nearest.data(),
+            static_cast<int>(nearest.size()),
+            beam_width,
+            metric
+        );
+        if (static_cast<int>(candidates.size()) > k) {
+            candidates.resize(static_cast<std::size_t>(k));
+        }
+        output.push_back(candidates);
+    }
+
+    return output;
+}
+
 std::vector<int> prune_connections(
     const float* vectors,
     int n_vectors,

@@ -205,16 +205,17 @@ the same 99.1% Recall@10. The C++ batch builder then reduced build time from
 17.50s to 2.46s, with the same recall and about 11.1k QPS.
 
 On a refreshed SIFT1M 100k ChromaDB comparison with `ef_search=100`, the current
-C++/CSR path built in 45.96s, reached 3,921.1 batch QPS at 98.20% Recall@10,
-and had 0.8460ms single-query p99 latency. ChromaDB built in 4.33s, reached
-6,740.3 batch QPS at 99.80% Recall@10, and had 0.4923ms single-query p99
+C++/CSR path built in 49.79s, reached 4,266.4 batch QPS at 98.50% Recall@10,
+and had 1.0822ms single-query p99 latency. ChromaDB built in 4.83s, reached
+6,476.6 batch QPS at 99.70% Recall@10, and had 0.5752ms single-query p99
 latency. Build time is still the largest production gap; search is closer but
 ChromaDB remains faster.
 
-`HNSWIndex.search_batch()` now gives benchmarks and callers a stable batch-query
-API. In this chunk it delegates to repeated `search()` calls, so the remaining
-gap still requires native C++ batch traversal or distance-kernel work rather
-than more Python call-site cleanup.
+`HNSWIndex.search_batch()` now dispatches compact CSR indexes to a native
+C++/Cython batch path. This removed the Python full-search loop per query and
+improved the 100k batch result from 3,921.1 to 4,266.4 QPS. The remaining search
+gap now lives inside C++ layer traversal and distance computation rather than
+the public Python batch call boundary.
 
 The earlier insertion-time pruning helper did not improve build time on its own.
 The useful boundary was moving construction traversal and mutable adjacency
