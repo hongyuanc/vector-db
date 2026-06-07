@@ -204,6 +204,11 @@ search cache moved query throughput from about 2.2k QPS to about 10.4k QPS at
 the same 99.1% Recall@10. The C++ batch builder then reduced build time from
 17.50s to 2.46s, with the same recall and about 11.1k QPS.
 
+On a refreshed SIFT1M 100k ChromaDB comparison with `ef_search=100`, the current
+C++/CSR path built in 48.85s, reached 2,969.6 QPS at 98.40% Recall@10, and
+ChromaDB built in 4.65s with 5,157.3 QPS at 99.80% Recall@10. Build time is
+still the largest production gap; search is closer but ChromaDB remains faster.
+
 The earlier insertion-time pruning helper did not improve build time on its own.
 The useful boundary was moving construction traversal and mutable adjacency
 together. The builder now also returns the CSR search cache directly, avoiding a

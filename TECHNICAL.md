@@ -1216,12 +1216,29 @@ for the current graph shape. This keeps the project honest about the current
 tradeoff: batch-built indexes are compact for build/search/save/load, while
 online mutation remains supported through the older materialized Python graph.
 
+The 100k ChromaDB comparison was refreshed after the C++ batch builder and
+compact CSR search path were in place. This used
+`tests/benchmarks/test_chromadb_comparison.py::TestChromaDBComparison::test_chromadb_vs_ours_100k`
+on SIFT1M 100k with `M=16`, `ef_construction=200`, `ef_search=100`, and 100
+queries.
+
+| System | Build Time | QPS | Avg Latency | Recall@10 |
+|--------|-----------:|----:|------------:|----------:|
+| Our HNSW C++/CSR | 48.85s | 2,969.6 | 0.34ms | 98.40% |
+| ChromaDB | 4.65s | 5,157.3 | 0.19ms | 99.80% |
+
+Compared with ChromaDB, the current implementation is still about 10.5x slower
+to build and about 1.7x slower per query at this scale. That is a much narrower
+search gap than the original Cython-era comparison, but build time remains the
+larger production gap. Recall is close but still lower by 1.4 percentage points.
+The next useful optimization should therefore be chosen based on product goals:
+native mutable graph ownership if online updates matter, or distance/search
+tuning if the target is closing the remaining ChromaDB search and recall gap.
+
 ### Next Steps
 
 - Decide whether online mutation is a project goal. If yes, replace the
   materializing mutation compatibility path with a native mutable graph object.
-- Run the same C++ batch builder on SIFT1M 100k and update the ChromaDB
-  comparison using fresh numbers.
 
 ---
 
