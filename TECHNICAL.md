@@ -1253,10 +1253,54 @@ optimize the C++ layer traversal itself, reduce per-layer visited allocation, or
 vectorize distance computation. Those changes should be measured against the
 same JSON artifact schema.
 
+## HNSW C++ Parity Plan
+
+What was there before: the project had already moved batch build, compact CSR
+graph ownership, persistence, and batch search into a C++/Cython path. On the
+saved SIFT1M 100k ChromaDB comparison, this reached 98.50% Recall@10 and
+4,266.4 batch QPS, but build time was still 49.79s versus ChromaDB's 4.83s.
+Search was closer than build, but ChromaDB still led on batch average latency,
+single-query p99 latency, and recall.
+
+What is planned: the next phase focuses on deeper C++ work for batch-built
+read indexes only. `HNSWIndex.build()` remains the target path. `insert()` and
+`delete()` keep the current compatibility behavior, where mutating a compact CSR
+index materializes Python connection sets and emits a warning.
+
+Why this matters: the remaining build gap is no longer mostly Python API
+overhead. The native builder still performs avoidable work, including repeated
+visited allocation, scalar Euclidean distance with `sqrt`, nested vector
+adjacency management, linear duplicate checks, and nearest-only neighbor
+selection. These are the same classes of implementation detail that separate a
+straightforward HNSW implementation from production libraries such as hnswlib.
+
+The implementation plan will proceed in commit-sized chunks:
+
+1. Add native phase instrumentation so build and search time are split into
+   measurable substeps.
+2. Use squared L2 distance internally for Euclidean ordering and convert back to
+   public L2 distances only at result boundaries.
+3. Reuse native scratch memory for visited marks and candidate/result buffers.
+4. Replace nested mutable adjacency with a lower-overhead bounded connection
+   layout.
+5. Add HNSW heuristic neighbor selection to improve graph navigability and
+   recall at the same construction parameters.
+6. Clean up native batch search setup and evaluate optional batch-only threading
+   after the single-threaded core is tighter.
+
+The first success target is SIFT1M 100k at `M=16`, `ef_construction=200`,
+`ef_search=100`, and `k=10`: reduce build time below 15s, raise Recall@10 to at
+least 99.30%, and raise batch QPS to at least 6,000 while preserving compact CSR
+storage.
+
 ### Next Steps
 
-- Decide whether online mutation is a project goal. If yes, replace the
-  materializing mutation compatibility path with a native mutable graph object.
+- Write the implementation plan for the C++ parity phase as small, testable,
+  commit-sized chunks.
+- Start with instrumentation before changing native behavior, so each
+  optimization has a measurable before/after result.
+- Leave native online mutation for a separate future design after the
+  batch-built read index path is closer to ChromaDB.
 
 ---
 
