@@ -1216,24 +1216,27 @@ for the current graph shape. This keeps the project honest about the current
 tradeoff: batch-built indexes are compact for build/search/save/load, while
 online mutation remains supported through the older materialized Python graph.
 
-The 100k ChromaDB comparison was refreshed after the C++ batch builder and
-compact CSR search path were in place. This used
+The 100k ChromaDB comparison was refreshed again after adding
+`HNSWIndex.search_batch()` as an explicit batch-query API boundary. This used
 `tests/benchmarks/test_chromadb_comparison.py::TestChromaDBComparison::test_chromadb_vs_ours_100k`
 on SIFT1M 100k with `M=16`, `ef_construction=200`, `ef_search=100`, and 100
-queries.
+queries. The benchmark now writes structured output to
+`benchmarks/results/sift1m-100k-chromadb-comparison.json` and a Markdown summary
+to `benchmarks/results/sift1m-100k-chromadb-comparison.md`.
 
-| System | Build Time | QPS | Avg Latency | Recall@10 |
-|--------|-----------:|----:|------------:|----------:|
-| Our HNSW C++/CSR | 48.85s | 2,969.6 | 0.34ms | 98.40% |
-| ChromaDB | 4.65s | 5,157.3 | 0.19ms | 99.80% |
+| System | Build Time | Batch QPS | Batch Avg Latency | Single p99 | Recall@10 |
+|--------|-----------:|----------:|------------------:|-----------:|----------:|
+| Our HNSW C++/CSR | 45.96s | 3,921.1 | 0.2550ms | 0.8460ms | 98.20% |
+| ChromaDB | 4.33s | 6,740.3 | 0.1484ms | 0.4923ms | 99.80% |
 
-Compared with ChromaDB, the current implementation is still about 10.5x slower
-to build and about 1.7x slower per query at this scale. That is a much narrower
-search gap than the original Cython-era comparison, but build time remains the
-larger production gap. Recall is close but still lower by 1.4 percentage points.
-The next useful optimization should therefore be chosen based on product goals:
-native mutable graph ownership if online updates matter, or distance/search
-tuning if the target is closing the remaining ChromaDB search and recall gap.
+Compared with ChromaDB, the current implementation is still about 10.6x slower
+to build and about 1.7x slower on both batch average latency and single-query
+p99 latency at this scale. The explicit `search_batch()` method improved the
+benchmark boundary and gives future search work one stable call site, but today
+it still delegates to `search()` one query at a time. Therefore the remaining
+gap is not solved by Python call-site cleanup alone. The next useful
+performance work should move real batch traversal and/or distance computation
+inside the C++ layer, then remeasure against the same JSON artifact schema.
 
 ### Next Steps
 

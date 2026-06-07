@@ -678,6 +678,46 @@ class TestBuild:
         for i in range(len(results) - 1):
             assert results[i][1] <= results[i + 1][1]
 
+    def test_search_batch_matches_repeated_search(self):
+        """Test that batch search returns the same results as repeated search."""
+        index = HNSWIndex(M=5, ef_construction=50, metric="euclidean")
+
+        np.random.seed(42)
+        vectors = np.random.randn(30, 4).astype(np.float32)
+        queries = np.random.randn(6, 4).astype(np.float32)
+        index.build(vectors)
+
+        batch_results = index.search_batch(queries, k=4, ef=12)
+        repeated_results = [index.search(query, k=4, ef=12) for query in queries]
+
+        assert len(batch_results) == len(queries)
+        assert batch_results == repeated_results
+
+    def test_search_batch_empty_query_batch(self):
+        """Test that batch search handles zero queries."""
+        index = HNSWIndex(M=5, ef_construction=50, metric="euclidean")
+        vectors = np.random.randn(10, 4).astype(np.float32)
+        queries = np.array([], dtype=np.float32).reshape(0, 4)
+        index.build(vectors)
+
+        assert index.search_batch(queries, k=3) == []
+
+    def test_search_batch_empty_index(self):
+        """Test that batch search returns one empty result per query on empty indexes."""
+        index = HNSWIndex(M=5, metric="euclidean")
+        queries = np.random.randn(3, 4).astype(np.float32)
+
+        assert index.search_batch(queries, k=3) == [[], [], []]
+
+    def test_search_batch_requires_query_batch(self):
+        """Test that batch search rejects a single query vector."""
+        index = HNSWIndex(M=5, ef_construction=50, metric="euclidean")
+        vectors = np.random.randn(10, 4).astype(np.float32)
+        index.build(vectors)
+
+        with pytest.raises(ValueError, match="queries must be a 2D array"):
+            index.search_batch(np.random.randn(4).astype(np.float32), k=3)
+
     def test_build_creates_connected_graph(self):
         """Test that build creates a connected graph."""
         index = HNSWIndex(M=3, ef_construction=50, metric="euclidean")

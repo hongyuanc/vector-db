@@ -613,6 +613,36 @@ class HNSWIndex(VectorIndex):
         # Return top-k results
         return candidates[:k]
 
+    def search_batch(
+        self,
+        queries: np.ndarray,
+        k: int,
+        ef: int = None,
+    ) -> list[list[tuple[int, float]]]:
+        """
+        Search for k nearest neighbors for each query vector.
+
+        This keeps batch-query call sites explicit and gives benchmarks one API
+        to optimize further without changing search semantics.
+
+        Args:
+            queries: Query vectors (n_queries x dimension)
+            k: Number of neighbors to return per query
+            ef: Search width at layer 0 (defaults to self.ef_search)
+
+        Returns:
+            One search result list per query, preserving query order.
+        """
+        query_array = np.asarray(queries)
+        if query_array.ndim != 2:
+            raise ValueError("queries must be a 2D array shaped (n_queries, dimension)")
+        if query_array.shape[0] == 0:
+            return []
+        if self.entry_point is None:
+            return [[] for _query in range(query_array.shape[0])]
+
+        return [self.search(query, k=k, ef=ef) for query in query_array]
+
     def _search_layer(
         self,
         query: np.ndarray,

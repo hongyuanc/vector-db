@@ -15,9 +15,12 @@ FAIRNESS CRITERIA:
 This compares HNSW algorithm performance, not database features.
 """
 
-import pytest
-import numpy as np
+import json
 import time
+from pathlib import Path
+
+import numpy as np
+import pytest
 
 try:
     import chromadb
@@ -39,9 +42,71 @@ except ImportError:
     WEAVIATE_AVAILABLE = False
 
 from src.index.hnsw import HNSWIndex
+
+from .datasets import compute_ground_truth
 from .real_datasets import load_dataset
 from .test_recall_accuracy import calculate_recall
-from .datasets import compute_ground_truth
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _latency_percentiles(latencies_ms):
+    samples = np.array(latencies_ms, dtype=np.float64)
+    return {
+        "average": round(float(np.mean(samples)), 4),
+        "p50": round(float(np.percentile(samples, 50)), 4),
+        "p95": round(float(np.percentile(samples, 95)), 4),
+        "p99": round(float(np.percentile(samples, 99)), 4),
+    }
+
+
+def _time_single_query_latencies(search_one, queries):
+    latencies_ms = []
+    for query in queries:
+        start = time.perf_counter()
+        search_one(query)
+        latencies_ms.append((time.perf_counter() - start) * 1000)
+    return _latency_percentiles(latencies_ms)
+
+
+def _write_comparison_artifacts(name, result):
+    output_dir = PROJECT_ROOT / "benchmarks" / "results"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    json_path = output_dir / f"{name}.json"
+    markdown_path = output_dir / f"{name}.md"
+    json_path.write_text(json.dumps(result, indent=2) + "\n")
+
+    lines = [
+        "# ChromaDB Comparison",
+        "",
+        f"- Dataset: `{result['dataset']['name']}`",
+        f"- Vectors: `{result['dataset']['size']}`",
+        f"- Queries: `{result['dataset']['queries']}`",
+        f"- M: `{result['config']['M']}`",
+        f"- ef_construction: `{result['config']['ef_construction']}`",
+        f"- ef_search: `{result['config']['ef_search']}`",
+        "",
+        "| System | Build Time | Batch QPS | Batch Avg Latency | Single p50 | Single p95 | Single p99 | Recall@10 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for system, metrics in result["systems"].items():
+        latency = metrics["single_query_latency_ms"]
+        lines.append(
+            "| "
+            f"{system} | "
+            f"{metrics['build_time_seconds']:.4f}s | "
+            f"{metrics['batch_qps']:.2f} | "
+            f"{metrics['batch_average_latency_ms']:.4f}ms | "
+            f"{latency['p50']:.4f}ms | "
+            f"{latency['p95']:.4f}ms | "
+            f"{latency['p99']:.4f}ms | "
+            f"{metrics['recall_at_10']:.4f} |"
+        )
+    lines.append("")
+    markdown_path.write_text("\n".join(lines))
+
+    return json_path, markdown_path
 
 
 @pytest.mark.skipif(not CHROMADB_AVAILABLE, reason="ChromaDB not installed")
@@ -95,12 +160,13 @@ class TestChromaDBComparison:
         print(f"Build time: {our_build_time:.2f}s")
 
         # Search benchmark
-        our_predictions = np.zeros((n_test_queries, k), dtype=np.int32)
         search_start = time.time()
-        for i, query in enumerate(test_queries):
-            results = hnsw.search(query, k=k)
-            our_predictions[i] = [vid for vid, _ in results][:k]
+        our_batch_results = hnsw.search_batch(test_queries, k=k)
         our_search_time = time.time() - search_start
+
+        our_predictions = np.zeros((n_test_queries, k), dtype=np.int32)
+        for i, results in enumerate(our_batch_results):
+            our_predictions[i] = [vid for vid, _ in results][:k]
 
         our_qps = n_test_queries / our_search_time
         our_latency = our_search_time / n_test_queries * 1000
@@ -253,12 +319,18 @@ class TestChromaDBComparison:
 
         print(f"Build time: {our_build_time:.2f}s ({our_build_time/60:.1f} min)")
 
-        our_predictions = np.zeros((n_test_queries, k), dtype=np.int32)
+        our_single_query_latency = _time_single_query_latencies(
+            lambda query: hnsw.search(query, k=k),
+            test_queries,
+        )
+
         search_start = time.time()
-        for i, query in enumerate(test_queries):
-            results = hnsw.search(query, k=k)
-            our_predictions[i] = [vid for vid, _ in results][:k]
+        our_batch_results = hnsw.search_batch(test_queries, k=k)
         our_search_time = time.time() - search_start
+
+        our_predictions = np.zeros((n_test_queries, k), dtype=np.int32)
+        for i, results in enumerate(our_batch_results):
+            our_predictions[i] = [vid for vid, _ in results][:k]
 
         our_qps = n_test_queries / our_search_time
         our_latency = our_search_time / n_test_queries * 1000
@@ -300,6 +372,14 @@ class TestChromaDBComparison:
         chroma_build_time = time.time() - build_start
         print(f"Build time: {chroma_build_time:.2f}s ({chroma_build_time/60:.1f} min)")
 
+        chroma_single_query_latency = _time_single_query_latencies(
+            lambda query: collection.query(
+                query_embeddings=[query.tolist()],
+                n_results=k,
+            ),
+            test_queries,
+        )
+
         # Search benchmark - BATCHED to remove Python loop overhead
         search_start = time.time()
 
@@ -323,6 +403,49 @@ class TestChromaDBComparison:
         print(f"Avg latency: {chroma_latency:.2f}ms")
         print()
 
+        comparison_result = {
+            "schema_version": "chromadb-comparison.v1",
+            "dataset": {
+                "name": "sift1m",
+                "size": int(len(vectors)),
+                "dimension": int(vectors.shape[1]),
+                "queries": int(n_test_queries),
+            },
+            "config": {
+                "M": 16,
+                "ef_construction": 200,
+                "ef_search": 100,
+                "k": k,
+                "metric": "euclidean",
+            },
+            "systems": {
+                "Our HNSW C++/CSR": {
+                    "build_time_seconds": round(our_build_time, 6),
+                    "batch_search_time_seconds": round(our_search_time, 6),
+                    "batch_qps": round(our_qps, 4),
+                    "batch_average_latency_ms": round(our_latency, 4),
+                    "single_query_latency_ms": our_single_query_latency,
+                    "recall_at_10": round(our_recall, 6),
+                    "graph_storage_mode": hnsw.graph_storage_mode,
+                },
+                "ChromaDB": {
+                    "build_time_seconds": round(chroma_build_time, 6),
+                    "batch_search_time_seconds": round(chroma_search_time, 6),
+                    "batch_qps": round(chroma_qps, 4),
+                    "batch_average_latency_ms": round(chroma_latency, 4),
+                    "single_query_latency_ms": chroma_single_query_latency,
+                    "recall_at_10": round(chroma_recall, 6),
+                },
+            },
+        }
+        json_path, markdown_path = _write_comparison_artifacts(
+            "sift1m-100k-chromadb-comparison",
+            comparison_result,
+        )
+        print(f"Structured comparison written to {json_path}")
+        print(f"Markdown comparison written to {markdown_path}")
+        print()
+
         # Summary
         print(f"{'='*70}")
         print("Summary (100k vectors)")
@@ -333,6 +456,7 @@ class TestChromaDBComparison:
         print(f"{'Recall@10':<20} {our_recall:<15.2%} {chroma_recall:<15.2%} {our_recall/chroma_recall:<15.2f}x")
         print(f"{'QPS':<20} {our_qps:<15.1f} {chroma_qps:<15.1f} {our_qps/chroma_qps:<15.2f}x")
         print(f"{'Latency (ms)':<20} {our_latency:<15.2f} {chroma_latency:<15.2f} {our_latency/chroma_latency:<15.2f}x")
+        print(f"{'Single p99 (ms)':<20} {our_single_query_latency['p99']:<15.4f} {chroma_single_query_latency['p99']:<15.4f} {our_single_query_latency['p99']/chroma_single_query_latency['p99']:<15.2f}x")
         print(f"{'='*70}\n")
 
 
