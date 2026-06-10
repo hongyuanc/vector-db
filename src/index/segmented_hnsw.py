@@ -71,12 +71,14 @@ def _default_segment_factory(
     M: int,
     ef_construction: int,
     ef_search: int,
+    ml: float,
     metric: str,
 ) -> HNSWIndex:
     return HNSWIndex(
         M=M,
         ef_construction=ef_construction,
         ef_search=ef_search,
+        ml=ml,
         metric=metric,
     )
 
@@ -122,7 +124,9 @@ class SegmentedHNSWIndex:
     def graph_storage_mode(self) -> str:
         if not self.segments:
             return "empty"
-        return "segmented_csr"
+        if all(segment.index.graph_storage_mode == "compact_csr" for segment in self.segments):
+            return "segmented_csr"
+        return "segmented_mixed"
 
     def build(self, vectors: np.ndarray) -> None:
         self.vectors = np.asarray(vectors, dtype=np.float32)
@@ -171,7 +175,10 @@ class SegmentedHNSWIndex:
         for segment in self.segments:
             for local_id, distance in segment.index.search(query, k=per_segment_k, ef=ef):
                 candidates.append((segment.start + int(local_id), float(distance)))
-        candidates.sort(key=lambda item: (item[1], item[0]))
+        if self.metric == "cosine":
+            candidates.sort(key=lambda item: (-item[1], item[0]))
+        else:
+            candidates.sort(key=lambda item: (item[1], item[0]))
         return candidates[:k]
 
     def search_batch(
@@ -216,6 +223,7 @@ class SegmentedHNSWIndex:
             M=self.M,
             ef_construction=self.ef_construction,
             ef_search=self.ef_search,
+            ml=self.ml,
             metric=self.metric,
         )
         build_start = time.perf_counter()

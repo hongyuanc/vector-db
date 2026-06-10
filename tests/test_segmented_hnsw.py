@@ -3,10 +3,11 @@ import pytest
 
 
 class FakeExactSegment:
-    def __init__(self, M=16, ef_construction=200, ef_search=50, metric="euclidean"):
+    def __init__(self, M=16, ef_construction=200, ef_search=50, ml=None, metric="euclidean"):
         self.M = M
         self.ef_construction = ef_construction
         self.ef_search = ef_search
+        self.ml = ml
         self.metric = metric
         self.vectors = None
         self._last_cpp_build_stats = None
@@ -148,6 +149,87 @@ def test_segmented_hnsw_search_batch_preserves_query_order_and_global_ids():
         [0, 1],
         [3, 2],
     ]
+
+
+class FakeCosineSegment(FakeExactSegment):
+    def search(self, query, k, ef=None):
+        query_norm = np.linalg.norm(query)
+        vector_norms = np.linalg.norm(self.vectors, axis=1)
+        scores = (self.vectors @ query) / (vector_norms * query_norm)
+        order = np.argsort(-scores, kind="stable")[:k]
+        return [(int(local_id), float(scores[local_id])) for local_id in order]
+
+
+def test_segmented_hnsw_merges_cosine_results_by_descending_similarity():
+    from src.index.segmented_hnsw import SegmentedHNSWIndex
+
+    vectors = np.array(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.8, 0.2],
+            [0.6, 0.4],
+        ],
+        dtype=np.float32,
+    )
+
+    index = SegmentedHNSWIndex(
+        metric="cosine",
+        segment_count=2,
+        build_threads=1,
+        segment_factory=FakeCosineSegment,
+    )
+    index.build(vectors)
+
+    results = index.search(np.array([1.0, 0.0], dtype=np.float32), k=3)
+    assert [vector_id for vector_id, _score in results] == [0, 2, 3]
+
+
+class RecordingSegment(FakeExactSegment):
+    created_ml_values = []
+
+    def __init__(self, M=16, ef_construction=200, ef_search=50, ml=None, metric="euclidean"):
+        super().__init__(
+            M=M,
+            ef_construction=ef_construction,
+            ef_search=ef_search,
+            ml=ml,
+            metric=metric,
+        )
+        self.created_ml_values.append(ml)
+
+
+def test_segmented_hnsw_forwards_ml_to_segment_factory():
+    from src.index.segmented_hnsw import SegmentedHNSWIndex
+
+    RecordingSegment.created_ml_values = []
+    vectors = np.arange(12, dtype=np.float32).reshape(6, 2)
+
+    index = SegmentedHNSWIndex(
+        ml=0.75,
+        segment_count=2,
+        build_threads=1,
+        segment_factory=RecordingSegment,
+    )
+    index.build(vectors)
+
+    assert RecordingSegment.created_ml_values == [0.75, 0.75]
+
+
+class FakeMaterializedSegment(FakeExactSegment):
+    @property
+    def graph_storage_mode(self):
+        return "materialized_python"
+
+
+def test_segmented_hnsw_reports_mixed_graph_storage_when_segments_are_not_all_compact():
+    from src.index.segmented_hnsw import SegmentedHNSWIndex
+
+    vectors = np.arange(12, dtype=np.float32).reshape(6, 2)
+    index = SegmentedHNSWIndex(segment_count=2, segment_factory=FakeMaterializedSegment)
+    index.build(vectors)
+
+    assert index.graph_storage_mode == "segmented_mixed"
 
 
 def test_segmented_hnsw_rejects_invalid_segment_settings():
