@@ -32,6 +32,8 @@ def test_run_benchmark_suite_returns_structured_metrics():
         "ef_construction": 20,
         "ef_search": 10,
         "metric": "euclidean",
+        "segment_count": 1,
+        "build_threads": 1,
     }
 
     metrics = result["metrics"]
@@ -193,3 +195,87 @@ def test_main_writes_json_and_markdown_reports(tmp_path):
     assert "C++ Average Prune Input Size" in markdown
     assert "Compact Save Time" in markdown
     assert "Materialized Save Time" in markdown
+
+
+def test_run_benchmark_suite_reports_segmented_build_stats():
+    benchmark = import_module("benchmarks.benchmark")
+
+    result = benchmark.run_benchmark_suite(
+        dataset="random",
+        size=90,
+        dimension=8,
+        n_queries=6,
+        k=3,
+        metric="euclidean",
+        M=4,
+        ef_construction=20,
+        ef_search=10,
+        seed=123,
+        warmup_queries=1,
+        segment_count=3,
+        build_threads=1,
+    )
+
+    assert result["config"]["hnsw"]["segment_count"] == 3
+    assert result["config"]["hnsw"]["build_threads"] == 1
+
+    segmented = result["metrics"]["segmented_build_stats"]
+    assert segmented["uses_segmented_build"] is True
+    assert segmented["segment_count"] == 3
+    assert segmented["build_threads"] == 1
+    assert segmented["segment_sizes"] == [30, 30, 30]
+    assert len(segmented["segment_build_seconds"]) == 3
+    assert segmented["max_segment_build_seconds"] >= 0.0
+
+    cpp_build_stats = result["metrics"]["cpp_build_stats"]
+    assert cpp_build_stats["vectors"] == 90
+    assert cpp_build_stats["candidate_search_seconds"] >= 0.0
+    assert result["metrics"]["persistence"]["compact"]["available"] is False
+    assert result["metrics"]["persistence"]["materialized"]["available"] is False
+
+
+def test_main_writes_segmented_markdown_rows(tmp_path):
+    benchmark = import_module("benchmarks.benchmark")
+    json_path = tmp_path / "segmented.json"
+    markdown_path = tmp_path / "segmented.md"
+
+    exit_code = benchmark.main(
+        [
+            "--dataset",
+            "random",
+            "--size",
+            "90",
+            "--dimension",
+            "8",
+            "--queries",
+            "6",
+            "--k",
+            "3",
+            "--M",
+            "4",
+            "--ef-construction",
+            "20",
+            "--ef-search",
+            "10",
+            "--warmup-queries",
+            "1",
+            "--segments",
+            "3",
+            "--build-threads",
+            "1",
+            "--output",
+            str(json_path),
+            "--markdown-output",
+            str(markdown_path),
+        ]
+    )
+
+    assert exit_code == 0
+    data = json.loads(json_path.read_text())
+    assert data["metrics"]["segmented_build_stats"]["segment_count"] == 3
+
+    markdown = markdown_path.read_text()
+    assert "Segmented Build" in markdown
+    assert "Segment Count" in markdown
+    assert "Build Threads" in markdown
+    assert "Max Segment Build" in markdown

@@ -34,6 +34,9 @@ _hnsw_module = importlib.import_module("src.index.hnsw")
 CYTHON_AVAILABLE = _hnsw_module.CYTHON_AVAILABLE
 CPP_AVAILABLE = _hnsw_module.CPP_AVAILABLE
 HNSWIndex = _hnsw_module.HNSWIndex
+SegmentedHNSWIndex = importlib.import_module(
+    "src.index.segmented_hnsw"
+).SegmentedHNSWIndex
 
 
 BYTES_PER_MIB = 1024 * 1024
@@ -399,6 +402,8 @@ def run_benchmark_suite(
     subset: str | None = None,
     warmup_queries: int = 10,
     download_if_missing: bool = False,
+    segment_count: int = 1,
+    build_threads: int = 1,
 ) -> dict[str, Any]:
     """Run one benchmark configuration and return structured results."""
     if metric not in {"euclidean", "cosine"}:
@@ -411,6 +416,10 @@ def run_benchmark_suite(
         raise ValueError("n_queries must be positive")
     if k <= 0:
         raise ValueError("k must be positive")
+    if segment_count <= 0:
+        raise ValueError("segment_count must be positive")
+    if build_threads <= 0:
+        raise ValueError("build_threads must be positive")
 
     vectors, queries = load_dataset(
         dataset,
@@ -427,12 +436,22 @@ def run_benchmark_suite(
     np.random.seed(seed)
 
     rss_before = _peak_rss_mb()
-    index = HNSWIndex(
-        M=M,
-        ef_construction=ef_construction,
-        ef_search=ef_search,
-        metric=metric,
-    )
+    if segment_count > 1:
+        index = SegmentedHNSWIndex(
+            M=M,
+            ef_construction=ef_construction,
+            ef_search=ef_search,
+            metric=metric,
+            segment_count=segment_count,
+            build_threads=build_threads,
+        )
+    else:
+        index = HNSWIndex(
+            M=M,
+            ef_construction=ef_construction,
+            ef_search=ef_search,
+            metric=metric,
+        )
 
     build_start = time.perf_counter()
     index.build(vectors)
@@ -456,9 +475,18 @@ def run_benchmark_suite(
     recall = _calculate_recall(predictions, ground_truth, effective_k)
 
     rss_after = _peak_rss_mb()
-    graph_memory = _estimate_graph_memory(index)
+    if hasattr(index, "estimate_graph_memory"):
+        graph_memory = index.estimate_graph_memory()
+    else:
+        graph_memory = _estimate_graph_memory(index)
     cpp_build_stats = _normalize_cpp_build_stats(index._last_cpp_build_stats)
-    persistence = _benchmark_persistence(index)
+    if segment_count > 1:
+        persistence = {
+            "compact": _unavailable_persistence_result(),
+            "materialized": _unavailable_persistence_result(),
+        }
+    else:
+        persistence = _benchmark_persistence(index)
     memory: dict[str, Any] = {
         "vector_data_mb": round(float(vectors.nbytes) / BYTES_PER_MIB, 2),
         "query_data_mb": round(float(queries.nbytes) / BYTES_PER_MIB, 2),
@@ -484,6 +512,8 @@ def run_benchmark_suite(
                 "ef_construction": ef_construction,
                 "ef_search": ef_search,
                 "metric": metric,
+                "segment_count": segment_count,
+                "build_threads": build_threads,
             },
             "k": effective_k,
             "warmup_queries": min(warmup_queries, len(queries)),
@@ -494,6 +524,7 @@ def run_benchmark_suite(
             "build_time_seconds": round(build_time, 6),
             "vectors_per_second": round(len(vectors) / build_time, 2) if build_time else 0.0,
             "cpp_build_stats": cpp_build_stats,
+            "segmented_build_stats": getattr(index, "segmented_build_stats", None),
             "search_time_seconds": round(search_time, 6),
             "qps": round(len(queries) / search_time, 2) if search_time else 0.0,
             "latency_ms": _percentiles(latencies_ms),
@@ -520,6 +551,7 @@ def format_markdown_report(result: dict[str, Any]) -> str:
     latency = metrics["latency_ms"]
     memory = metrics["memory"]
     cpp_build_stats = metrics["cpp_build_stats"]
+    segmented_build_stats = metrics.get("segmented_build_stats")
     persistence = metrics["persistence"]
     compact = persistence["compact"]
     materialized = persistence["materialized"]
@@ -595,6 +627,17 @@ def format_markdown_report(result: dict[str, Any]) -> str:
             f"| C++ Prune Input Total | {cpp_build_stats['prune_input_total']} |",
             f"| C++ Average Prune Input Size | {cpp_build_stats['average_prune_input_size']} |",
             f"| C++ Max Prune Input Size | {cpp_build_stats['max_prune_input_size']} |",
+            *(
+                [
+                    f"| Segmented Build | {segmented_build_stats['uses_segmented_build']} |",
+                    f"| Segment Count | {segmented_build_stats['segment_count']} |",
+                    f"| Build Threads | {segmented_build_stats['build_threads']} |",
+                    f"| Max Segment Build | {segmented_build_stats['max_segment_build_seconds']:.6f}s |",
+                    f"| Sum Segment Build | {segmented_build_stats['sum_segment_build_seconds']:.6f}s |",
+                ]
+                if segmented_build_stats
+                else []
+            ),
             f"| QPS | {metrics['qps']:.2f} |",
             f"| Average Latency | {latency['average']:.4f} ms |",
             f"| p50 Latency | {latency['p50']:.4f} ms |",
@@ -639,6 +682,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--distribution", choices=["normal", "uniform"], default="normal")
     parser.add_argument("--warmup-queries", type=int, default=10)
     parser.add_argument("--download-if-missing", action="store_true")
+    parser.add_argument(
+        "--segments",
+        type=int,
+        default=1,
+        help="Number of independent HNSW build segments",
+    )
+    parser.add_argument(
+        "--build-threads",
+        type=int,
+        default=1,
+        help="Parallel segment build worker count",
+    )
     parser.add_argument("--output", default="results.json", help="JSON output path")
     parser.add_argument("--markdown-output", default=None, help="Optional Markdown output path")
     return parser
@@ -663,6 +718,8 @@ def main(argv: list[str] | None = None) -> int:
         subset=args.subset,
         warmup_queries=args.warmup_queries,
         download_if_missing=args.download_if_missing,
+        segment_count=args.segments,
+        build_threads=args.build_threads,
     )
 
     output_path = Path(args.output)
