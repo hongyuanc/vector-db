@@ -210,8 +210,8 @@ def test_cpp_build_graph_reports_detailed_build_counters():
     )
     assert stats["visited_nodes"] == stats["search_distance_evaluations"]
     assert stats["max_visited_nodes_per_search"] > 0
-    assert stats["candidate_heap_pushes"] >= stats["visited_nodes"]
-    assert stats["result_heap_pushes"] >= stats["visited_nodes"]
+    assert 0 < stats["candidate_heap_pushes"] <= stats["visited_nodes"]
+    assert 0 < stats["result_heap_pushes"] <= stats["visited_nodes"]
     assert stats["neighbor_selection_calls"] > 0
     assert stats["selected_degree_total"] > 0
     assert stats["average_selected_degree"] > 0.0
@@ -219,6 +219,28 @@ def test_cpp_build_graph_reports_detailed_build_counters():
     assert stats["prune_calls"] >= 0
     assert stats["max_prune_input_size"] >= 0
     assert stats["average_prune_input_size"] >= 0.0
+
+
+def test_cpp_build_graph_skips_unpromising_search_heap_candidates():
+    from src.index import hnsw_cpp
+
+    rng = np.random.default_rng(1)
+    vectors = rng.standard_normal((60, 8), dtype=np.float32)
+    levels = np.zeros(len(vectors), dtype=np.int32)
+
+    graph = hnsw_cpp.build_graph(
+        vectors=vectors,
+        levels=levels,
+        max_connections=2,
+        ef_construction=10,
+        metric="euclidean",
+        include_connections=False,
+    )
+
+    stats = graph["build_stats"]
+    assert stats["visited_nodes"] == stats["search_distance_evaluations"]
+    assert stats["candidate_heap_pushes"] < stats["visited_nodes"]
+    assert stats["result_heap_pushes"] < stats["visited_nodes"]
 
 
 def test_cpp_build_graph_reuses_visited_scratch():

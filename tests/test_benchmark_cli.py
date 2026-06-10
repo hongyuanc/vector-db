@@ -133,8 +133,8 @@ def test_run_benchmark_suite_returns_structured_metrics():
         )
         assert cpp_build_stats["visited_nodes"] == cpp_build_stats["search_distance_evaluations"]
         assert cpp_build_stats["max_visited_nodes_per_search"] > 0
-        assert cpp_build_stats["candidate_heap_pushes"] >= cpp_build_stats["visited_nodes"]
-        assert cpp_build_stats["result_heap_pushes"] >= cpp_build_stats["visited_nodes"]
+        assert 0 < cpp_build_stats["candidate_heap_pushes"] <= cpp_build_stats["visited_nodes"]
+        assert 0 < cpp_build_stats["result_heap_pushes"] <= cpp_build_stats["visited_nodes"]
         assert cpp_build_stats["neighbor_selection_calls"] > 0
         assert cpp_build_stats["average_selected_degree"] > 0
     else:

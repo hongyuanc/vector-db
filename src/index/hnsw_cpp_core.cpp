@@ -481,6 +481,13 @@ std::vector<HeapItem> search_mutable_layer(
                 use_euclidean
             );
 
+            const bool result_can_improve =
+                static_cast<int>(results.size()) < num_closest ||
+                distance <= results.front().distance;
+            if (!result_can_improve) {
+                continue;
+            }
+
             candidates.push_back({distance, neighbor_id});
             if (instrumentation != nullptr) {
                 ++instrumentation->candidate_heap_pushes;
