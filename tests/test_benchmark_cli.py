@@ -62,6 +62,22 @@ def test_run_benchmark_suite_returns_structured_metrics():
         "uses_heuristic_reverse_pruning",
         "adjacency_layers_allocated",
         "max_observed_degree",
+        "distance_evaluations",
+        "search_distance_evaluations",
+        "neighbor_selection_distance_evaluations",
+        "prune_distance_evaluations",
+        "visited_nodes",
+        "max_visited_nodes_per_search",
+        "candidate_heap_pushes",
+        "result_heap_pushes",
+        "neighbor_selection_calls",
+        "selected_degree_total",
+        "average_selected_degree",
+        "max_selected_degree",
+        "prune_calls",
+        "prune_input_total",
+        "average_prune_input_size",
+        "max_prune_input_size",
     }
     assert metrics["cpp_build_stats"]["vectors"] == 80
     assert metrics["cpp_build_stats"]["dimensions"] == 8
@@ -109,6 +125,18 @@ def test_run_benchmark_suite_returns_structured_metrics():
     if result["environment"]["cpp_available"]:
         assert metrics["memory"]["graph"]["python_edges"] == 0
         assert metrics["memory"]["graph"]["cpp_edges"] > 0
+        cpp_build_stats = metrics["cpp_build_stats"]
+        assert cpp_build_stats["distance_evaluations"] == (
+            cpp_build_stats["search_distance_evaluations"]
+            + cpp_build_stats["neighbor_selection_distance_evaluations"]
+            + cpp_build_stats["prune_distance_evaluations"]
+        )
+        assert cpp_build_stats["visited_nodes"] == cpp_build_stats["search_distance_evaluations"]
+        assert cpp_build_stats["max_visited_nodes_per_search"] > 0
+        assert cpp_build_stats["candidate_heap_pushes"] >= cpp_build_stats["visited_nodes"]
+        assert cpp_build_stats["result_heap_pushes"] >= cpp_build_stats["visited_nodes"]
+        assert cpp_build_stats["neighbor_selection_calls"] > 0
+        assert cpp_build_stats["average_selected_degree"] > 0
     else:
         assert metrics["memory"]["graph"]["python_edges"] > 0
         assert metrics["memory"]["graph"]["cpp_edges"] == 0
@@ -159,5 +187,9 @@ def test_main_writes_json_and_markdown_reports(tmp_path):
     assert "Graph Total" in markdown
     assert "C++ Build Total" in markdown
     assert "C++ Visited Resizes" in markdown
+    assert "C++ Distance Evaluations" in markdown
+    assert "C++ Visited Nodes" in markdown
+    assert "C++ Average Selected Degree" in markdown
+    assert "C++ Average Prune Input Size" in markdown
     assert "Compact Save Time" in markdown
     assert "Materialized Save Time" in markdown
