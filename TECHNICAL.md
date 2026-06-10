@@ -1772,6 +1772,38 @@ section instead of inside scheduler-dependent worker execution. The Cython
 wrapper also releases the GIL around the native `cpp_build_graph()` call, so the
 thread pool can overlap native per-segment construction.
 
+### Measured Prototype Result
+
+What changed: segmented build is now available as an opt-in benchmark mode. The
+default `HNSWIndex.build()` path remains a single global graph. Segmented mode
+builds independent compact native graphs and merges per-segment results by
+global vector id and distance.
+
+Why it matters: this tests CPU parallelism without introducing same-graph
+parallel mutation. The result must be judged as a trade-off: elapsed build time,
+recall, query latency, QPS, memory, and segment count all matter.
+
+| Mode | Build Time | Recall@10 | QPS | Candidate Search | Notes |
+|---|---:|---:|---:|---:|---|
+| Single graph | 40.1198s | 0.9860 | 3378.48 | 30.4112s | Baseline after bounded enqueues |
+| 2 segments / 2 threads | 18.1246s | 0.9940 | 1900.17 | 25.8441s | Max segment build 18.0248s; p99 query 0.7728ms |
+| 4 segments / 4 threads | 8.1387s | 0.9980 | 1035.96 | 21.2902s | Max segment build 8.0366s; p99 query 1.4544ms |
+| 8 segments / 8 threads | 4.6599s | 0.9940 | 570.12 | 22.5983s | Max segment build 4.5575s; p99 query 2.4883ms |
+
+The 100k result shows why segmented build should stay opt-in for now. It gives a
+large build-time win: the 8-segment run built in `4.6599s`, compared with the
+single-graph baseline at `40.1198s`. Recall stayed above the baseline in these
+runs, but query throughput fell from `3378.48` QPS to `570.12` QPS at 8
+segments because every query searches more independent graphs before merging
+global top-k results. The benchmark artifacts are preserved in
+`benchmarks/results/hnsw-segmented-sift100k-{2,4,8}.json` and matching Markdown
+files.
+
+Next step: keep segmented build opt-in until the benchmark shows a build-time
+win that justifies the recall and query-latency trade-off for the target use
+case. If recall drops on other datasets, evaluate per-segment overfetching
+before changing segment assignment.
+
 ---
 
 ## Future Improvements
