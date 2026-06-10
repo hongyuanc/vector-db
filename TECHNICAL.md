@@ -1777,7 +1777,7 @@ thread pool can overlap native per-segment construction.
 What changed: segmented build is now available as an opt-in benchmark mode. The
 default `HNSWIndex.build()` path remains a single global graph. Segmented mode
 builds independent compact native graphs and merges per-segment results by
-global vector id and distance.
+distance or similarity, using global vector id as the deterministic tie-breaker.
 
 Why it matters: this tests CPU parallelism without introducing same-graph
 parallel mutation. The result must be judged as a trade-off: elapsed build time,
@@ -1798,6 +1798,12 @@ segments because every query searches more independent graphs before merging
 global top-k results. The benchmark artifacts are preserved in
 `benchmarks/results/hnsw-segmented-sift100k-{2,4,8}.json` and matching Markdown
 files.
+
+Artifact note: the preserved benchmark JSON files record `git_commit` as
+`9e2fb66` and `git_dirty` as `true` because the benchmark ran after the
+segmented implementation commits but before the documentation and result
+artifacts were committed. No code changes were made between those runs and the
+recorded documentation table.
 
 Next step: keep segmented build opt-in until the benchmark shows a build-time
 win that justifies the recall and query-latency trade-off for the target use
