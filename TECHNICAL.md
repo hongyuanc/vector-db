@@ -1323,6 +1323,45 @@ Verification added:
 - `tests/test_benchmark_cli.py` checks that benchmark JSON and Markdown reports
   expose the C++ build stats.
 
+### Detailed Build Counter Baseline
+
+What was there before: native build instrumentation exposed broad phase timings,
+which made it possible to separate graph construction, CSR export, and wrapper
+conversion. It still did not expose the detailed work counters needed to explain
+why graph construction was expensive: distance evaluations, visited nodes, heap
+operations, neighbor-selection work, and prune input sizes were not visible in
+benchmark artifacts.
+
+What changed: the native build path now exposes detailed build counters through
+the benchmark JSON and Markdown reports. The counters split C++ distance work
+across layer search, heuristic neighbor selection, and pruning, while also
+reporting visited-node totals and average graph-selection/prune sizes.
+
+Why this matters: the next optimization can target measured distance work
+instead of guessing. If most distance evaluations come from layer search, the
+best next step is different from a result where pruning or neighbor selection
+dominates. This keeps the HNSW work educational and evidence-driven: every
+optimization should have a counter that explains whether it reduced the intended
+cost.
+
+Measured result from the 10k random-vector benchmark:
+
+| Metric | Value |
+|---|---:|
+| Build Time | 2.9704s |
+| C++ Distance Evaluations | 53141500 |
+| C++ Search Distance Evaluations | 31351236 |
+| C++ Neighbor Selection Distance Evaluations | 8553272 |
+| C++ Prune Distance Evaluations | 13236992 |
+| C++ Visited Nodes | 31351236 |
+| C++ Average Selected Degree | 23.838104688662863 |
+| C++ Average Prune Input Size | 27.665596575708935 |
+
+Next step: target the largest measured source of distance work while preserving
+the SIFT1M 100k recall target. Based on this baseline, layer search distance
+evaluations are the first area to inspect before changing pruning or neighbor
+selection behavior.
+
 ## Squared L2 Native Ordering
 
 What was there before: the C++ path computed full Euclidean distance with
