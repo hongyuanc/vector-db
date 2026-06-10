@@ -63,6 +63,22 @@ cdef extern from "hnsw_cpp_core.hpp" namespace "vectordb":
         bool uses_heuristic_reverse_pruning
         int adjacency_layers_allocated
         int max_observed_degree
+        long long distance_evaluations
+        long long search_distance_evaluations
+        long long neighbor_selection_distance_evaluations
+        long long prune_distance_evaluations
+        long long visited_nodes
+        int max_visited_nodes_per_search
+        long long candidate_heap_pushes
+        long long result_heap_pushes
+        long long neighbor_selection_calls
+        long long selected_degree_total
+        double average_selected_degree
+        int max_selected_degree
+        long long prune_calls
+        long long prune_input_total
+        double average_prune_input_size
+        int max_prune_input_size
 
     cdef cppclass CppBuildGraphResult "vectordb::BuildGraphResult":
         int entry_point
@@ -437,5 +453,21 @@ def build_graph(
             "uses_heuristic_reverse_pruning": True if raw.build_stats.uses_heuristic_reverse_pruning else False,
             "adjacency_layers_allocated": raw.build_stats.adjacency_layers_allocated,
             "max_observed_degree": raw.build_stats.max_observed_degree,
+            "distance_evaluations": raw.build_stats.distance_evaluations,
+            "search_distance_evaluations": raw.build_stats.search_distance_evaluations,
+            "neighbor_selection_distance_evaluations": raw.build_stats.neighbor_selection_distance_evaluations,
+            "prune_distance_evaluations": raw.build_stats.prune_distance_evaluations,
+            "visited_nodes": raw.build_stats.visited_nodes,
+            "max_visited_nodes_per_search": raw.build_stats.max_visited_nodes_per_search,
+            "candidate_heap_pushes": raw.build_stats.candidate_heap_pushes,
+            "result_heap_pushes": raw.build_stats.result_heap_pushes,
+            "neighbor_selection_calls": raw.build_stats.neighbor_selection_calls,
+            "selected_degree_total": raw.build_stats.selected_degree_total,
+            "average_selected_degree": raw.build_stats.average_selected_degree,
+            "max_selected_degree": raw.build_stats.max_selected_degree,
+            "prune_calls": raw.build_stats.prune_calls,
+            "prune_input_total": raw.build_stats.prune_input_total,
+            "average_prune_input_size": raw.build_stats.average_prune_input_size,
+            "max_prune_input_size": raw.build_stats.max_prune_input_size,
         },
     }

@@ -84,6 +84,19 @@ struct SearchScratch {
     }
 };
 
+struct SearchInstrumentation {
+    long long distance_evaluations = 0;
+    long long visited_nodes = 0;
+    int max_visited_nodes_per_search = 0;
+    long long candidate_heap_pushes = 0;
+    long long result_heap_pushes = 0;
+};
+
+struct DistanceInstrumentation {
+    long long neighbor_selection_distance_evaluations = 0;
+    long long prune_distance_evaluations = 0;
+};
+
 struct MinHeapCompare {
     bool operator()(const HeapItem& left, const HeapItem& right) const {
         if (left.distance == right.distance) {
@@ -219,7 +232,8 @@ std::vector<int> select_heuristic_neighbor_ids(
     int node_id,
     const std::vector<HeapItem>& candidates,
     int max_connections,
-    bool use_euclidean
+    bool use_euclidean,
+    long long* distance_counter
 ) {
     if (
         vectors == nullptr ||
@@ -259,6 +273,9 @@ std::vector<int> select_heuristic_neighbor_ids(
                 dimension,
                 use_euclidean
             );
+            if (distance_counter != nullptr) {
+                ++(*distance_counter);
+            }
             if (selected_distance < candidate.distance) {
                 selected_is_closer = true;
                 break;
@@ -296,7 +313,8 @@ std::vector<int> prune_connection_vector(
     const std::vector<int>& connection_ids,
     int max_connections,
     bool use_euclidean,
-    bool use_heuristic
+    bool use_heuristic,
+    long long* distance_counter
 ) {
     if (node_id < 0 || node_id >= n_vectors || max_connections <= 0) {
         return {};
@@ -316,6 +334,9 @@ std::vector<int> prune_connection_vector(
         const double distance = use_euclidean
             ? squared_euclidean_distance(node_vector, connection_vector, dimension)
             : -cosine_similarity(node_vector, connection_vector, dimension);
+        if (distance_counter != nullptr) {
+            ++(*distance_counter);
+        }
         candidates.push_back({distance, connection_id});
     }
 
@@ -334,7 +355,8 @@ std::vector<int> prune_connection_vector(
             node_id,
             candidates,
             max_connections,
-            use_euclidean
+            use_euclidean,
+            distance_counter
         );
     }
 
@@ -362,7 +384,8 @@ std::vector<HeapItem> search_mutable_layer(
     int num_closest,
     int layer,
     bool use_euclidean,
-    SearchScratch& scratch
+    SearchScratch& scratch,
+    SearchInstrumentation* instrumentation
 ) {
     if (num_closest <= 0 || nodes.empty()) {
         return {};
@@ -377,6 +400,7 @@ std::vector<HeapItem> search_mutable_layer(
         expected_results * 2
     );
     scratch.prepare_heaps(expected_candidates, expected_results);
+    long long visited_this_search = 0;
     std::vector<HeapItem>& candidates = scratch.candidate_heap;
     std::vector<HeapItem>& results = scratch.result_heap;
     const MinHeapCompare min_heap_compare;
@@ -392,10 +416,21 @@ std::vector<HeapItem> search_mutable_layer(
         }
 
         scratch.mark_visited(entry_id);
+        ++visited_this_search;
+        if (instrumentation != nullptr) {
+            ++instrumentation->visited_nodes;
+            ++instrumentation->distance_evaluations;
+        }
         const double distance = heap_distance(query, vectors, entry_id, dimension, use_euclidean);
         candidates.push_back({distance, entry_id});
+        if (instrumentation != nullptr) {
+            ++instrumentation->candidate_heap_pushes;
+        }
         std::push_heap(candidates.begin(), candidates.end(), min_heap_compare);
         results.push_back({distance, entry_id});
+        if (instrumentation != nullptr) {
+            ++instrumentation->result_heap_pushes;
+        }
         std::push_heap(results.begin(), results.end(), max_heap_compare);
     }
 
@@ -433,6 +468,11 @@ std::vector<HeapItem> search_mutable_layer(
             }
 
             scratch.mark_visited(neighbor_id);
+            ++visited_this_search;
+            if (instrumentation != nullptr) {
+                ++instrumentation->visited_nodes;
+                ++instrumentation->distance_evaluations;
+            }
             const double distance = heap_distance(
                 query,
                 vectors,
@@ -442,8 +482,14 @@ std::vector<HeapItem> search_mutable_layer(
             );
 
             candidates.push_back({distance, neighbor_id});
+            if (instrumentation != nullptr) {
+                ++instrumentation->candidate_heap_pushes;
+            }
             std::push_heap(candidates.begin(), candidates.end(), min_heap_compare);
             results.push_back({distance, neighbor_id});
+            if (instrumentation != nullptr) {
+                ++instrumentation->result_heap_pushes;
+            }
             std::push_heap(results.begin(), results.end(), max_heap_compare);
 
             if (static_cast<int>(results.size()) > num_closest) {
@@ -451,6 +497,13 @@ std::vector<HeapItem> search_mutable_layer(
                 results.pop_back();
             }
         }
+    }
+
+    if (instrumentation != nullptr) {
+        instrumentation->max_visited_nodes_per_search = std::max(
+            instrumentation->max_visited_nodes_per_search,
+            static_cast<int>(visited_this_search)
+        );
     }
 
     return order_heap_results(results);
@@ -756,7 +809,8 @@ std::vector<int> prune_connections(
         connection_vector,
         max_connections,
         use_euclidean,
-        true
+        true,
+        nullptr
     );
 }
 
@@ -819,7 +873,8 @@ std::vector<int> select_heuristic_neighbors(
         node_id,
         candidates,
         max_connections,
-        use_euclidean
+        use_euclidean,
+        nullptr
     );
 }
 
@@ -884,6 +939,14 @@ BuildGraphResult build_graph(
     int adjacency_layers_allocated = 0;
     int max_observed_degree = 0;
     SearchScratch search_scratch;
+    SearchInstrumentation search_instrumentation;
+    DistanceInstrumentation distance_instrumentation;
+    long long neighbor_selection_calls = 0;
+    long long selected_degree_total = 0;
+    int max_selected_degree = 0;
+    long long prune_calls = 0;
+    long long prune_input_total = 0;
+    int max_prune_input_size = 0;
     search_scratch.ensure_size(static_cast<std::size_t>(n_vectors));
 
     for (int vector_id = 0; vector_id < n_vectors; ++vector_id) {
@@ -923,7 +986,8 @@ BuildGraphResult build_graph(
                 1,
                 layer,
                 use_euclidean,
-                search_scratch
+                search_scratch,
+                &search_instrumentation
             );
             const double elapsed = seconds_since(search_start);
             search_seconds += elapsed;
@@ -948,13 +1012,15 @@ BuildGraphResult build_graph(
                 ef_construction,
                 layer,
                 use_euclidean,
-                search_scratch
+                search_scratch,
+                &search_instrumentation
             );
             const double elapsed = seconds_since(search_start);
             search_seconds += elapsed;
             candidate_search_seconds += elapsed;
 
             const int layer_max_connections = layer == 0 ? max_connections * 2 : max_connections;
+            ++neighbor_selection_calls;
             std::vector<int> selected_neighbors = select_heuristic_neighbor_ids(
                 vectors,
                 n_vectors,
@@ -962,7 +1028,13 @@ BuildGraphResult build_graph(
                 vector_id,
                 candidates,
                 layer_max_connections,
-                use_euclidean
+                use_euclidean,
+                &distance_instrumentation.neighbor_selection_distance_evaluations
+            );
+            selected_degree_total += static_cast<long long>(selected_neighbors.size());
+            max_selected_degree = std::max(
+                max_selected_degree,
+                static_cast<int>(selected_neighbors.size())
             );
 
             ensure_layer(
@@ -1002,6 +1074,12 @@ BuildGraphResult build_graph(
 
                 if (static_cast<int>(neighbor_connections.size()) > layer_max_connections) {
                     const Clock::time_point prune_start = Clock::now();
+                    ++prune_calls;
+                    prune_input_total += static_cast<long long>(neighbor_connections.size());
+                    max_prune_input_size = std::max(
+                        max_prune_input_size,
+                        static_cast<int>(neighbor_connections.size())
+                    );
                     neighbor_connections = prune_connection_vector(
                         vectors,
                         n_vectors,
@@ -1010,7 +1088,8 @@ BuildGraphResult build_graph(
                         neighbor_connections,
                         layer_max_connections,
                         use_euclidean,
-                        false
+                        false,
+                        &distance_instrumentation.prune_distance_evaluations
                     );
                     prune_seconds += seconds_since(prune_start);
                 }
@@ -1114,6 +1193,35 @@ BuildGraphResult build_graph(
     result.build_stats.uses_heuristic_reverse_pruning = false;
     result.build_stats.adjacency_layers_allocated = adjacency_layers_allocated;
     result.build_stats.max_observed_degree = max_observed_degree;
+    result.build_stats.search_distance_evaluations =
+        search_instrumentation.distance_evaluations;
+    result.build_stats.neighbor_selection_distance_evaluations =
+        distance_instrumentation.neighbor_selection_distance_evaluations;
+    result.build_stats.prune_distance_evaluations =
+        distance_instrumentation.prune_distance_evaluations;
+    result.build_stats.distance_evaluations =
+        result.build_stats.search_distance_evaluations
+        + result.build_stats.neighbor_selection_distance_evaluations
+        + result.build_stats.prune_distance_evaluations;
+    result.build_stats.visited_nodes = search_instrumentation.visited_nodes;
+    result.build_stats.max_visited_nodes_per_search =
+        search_instrumentation.max_visited_nodes_per_search;
+    result.build_stats.candidate_heap_pushes =
+        search_instrumentation.candidate_heap_pushes;
+    result.build_stats.result_heap_pushes =
+        search_instrumentation.result_heap_pushes;
+    result.build_stats.neighbor_selection_calls = neighbor_selection_calls;
+    result.build_stats.selected_degree_total = selected_degree_total;
+    result.build_stats.average_selected_degree = neighbor_selection_calls == 0
+        ? 0.0
+        : static_cast<double>(selected_degree_total) / static_cast<double>(neighbor_selection_calls);
+    result.build_stats.max_selected_degree = max_selected_degree;
+    result.build_stats.prune_calls = prune_calls;
+    result.build_stats.prune_input_total = prune_input_total;
+    result.build_stats.average_prune_input_size = prune_calls == 0
+        ? 0.0
+        : static_cast<double>(prune_input_total) / static_cast<double>(prune_calls);
+    result.build_stats.max_prune_input_size = max_prune_input_size;
     result.build_stats.total_seconds = seconds_since(total_start);
 
     return result;

@@ -55,6 +55,22 @@ struct BuildStats {
     bool uses_heuristic_reverse_pruning = false;
     int adjacency_layers_allocated = 0;
     int max_observed_degree = 0;
+    long long distance_evaluations = 0;
+    long long search_distance_evaluations = 0;
+    long long neighbor_selection_distance_evaluations = 0;
+    long long prune_distance_evaluations = 0;
+    long long visited_nodes = 0;
+    int max_visited_nodes_per_search = 0;
+    long long candidate_heap_pushes = 0;
+    long long result_heap_pushes = 0;
+    long long neighbor_selection_calls = 0;
+    long long selected_degree_total = 0;
+    double average_selected_degree = 0.0;
+    int max_selected_degree = 0;
+    long long prune_calls = 0;
+    long long prune_input_total = 0;
+    double average_prune_input_size = 0.0;
+    int max_prune_input_size = 0;
 };
 
 struct BuildGraphResult {
