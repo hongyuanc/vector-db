@@ -1721,6 +1721,49 @@ Verification added:
 - Leave native online mutation for a separate future design after the
   batch-built read index path is closer to ChromaDB.
 
+## Planned Segmented Native Parallel Build
+
+What was there before: the project had intentionally stayed single-threaded
+while tightening the native HNSW builder. That was the right first step because
+the earlier build path still had avoidable single-threaded costs: full L2 square
+roots, repeated scratch allocation, reusable heap allocation, and enqueueing
+neighbors that could not improve the bounded result set. After those fixes, the
+SIFT1M 100k run still takes `40.12s`, with `30.41s` spent in insertion-layer
+candidate search.
+
+What is planned: the next parallelism design should use segmented native build.
+The dataset is split into several independent vector segments, each segment
+builds its own compact native HNSW graph, and search fans out across segment
+graphs before merging global top-k results. This keeps the existing C++ builder
+as the per-segment correctness baseline and moves the new complexity to clear
+boundaries: split, build segment, search segment, convert local ids to global
+ids, and merge results.
+
+Why this instead of same-graph parallel insertion: HNSW construction is
+order-dependent. Vector `i` is inserted into a graph formed by vectors `0..i-1`,
+and its search path, selected neighbors, reverse edges, and pruning all depend
+on that graph state. Inserting multiple vectors into the same mutable graph at
+the same time would require coordination around node allocation, entry point
+updates, adjacency writes, reverse-edge pruning, scratch buffers, and counters.
+Coarse locks would likely erase much of the speedup, while fine-grained locks
+would make the builder harder to reason about and could introduce nondeterminism
+or recall regressions. That makes same-graph parallel insertion a new HNSW
+construction algorithm, not a small optimization.
+
+Why segmented build matters: production vector databases often scale indexing
+through segments, shards, or partitions before attempting fully parallel
+mutation of one shared graph. Segmenting also creates a practical path to 1M:
+segments can be built, searched, persisted, loaded, or rebuilt independently.
+The trade-off is measurable and must stay explicit. Build time should improve
+with worker count, but recall, query latency, and memory may move because search
+now fans out across multiple smaller graphs instead of one global graph.
+
+Next step: write an implementation plan for an opt-in segmented build prototype.
+The first version should prove correctness and stats reporting with a sequential
+segmented path, then add build parallelism once the segment boundary is tested.
+SIFT1M 100k should be benchmarked at `1`, `2`, `4`, and `8` segments before
+deciding whether this becomes a recommended build mode.
+
 ---
 
 ## Future Improvements
