@@ -1698,6 +1698,12 @@ Verification added:
 - A 10k random-vector benchmark reported build time `2.1981s`,
   candidate-search time `1.4597s`, and `8,717,962` candidate/result heap pushes
   against `31,351,236` visited nodes.
+- The SIFT1M 100k validation run reported build time `40.1198s`, Recall@10
+  `0.9860`, QPS `3378.48`, native candidate-search time `30.4112s`, and
+  `72,037,485` candidate/result heap pushes against `293,421,124` visited
+  nodes. Compared with the previous documented standalone 100k run after
+  reusable search heaps, build time moved from `44.64s` to `40.12s` and
+  candidate-search time moved from `35.30s` to `30.41s`.
 
 ### Next Steps
 
@@ -1708,10 +1714,10 @@ Verification added:
   changes on the same benchmark shape.
 - Add an accuracy-focused benchmark slice that reports recall deltas across
   nearest-only versus heuristic construction on clustered data.
-- Measure bounded build-search enqueues on SIFT1M 100k. After reusable search
-  heaps, the 100k run still spent `35.30s` in candidate search, while greedy
-  descent was only `1.43s`; the next decision should use the same large-data
-  benchmark to see whether heap-pressure reduction changes that bottleneck.
+- Continue optimizing insertion-layer candidate search. After bounded build
+  search enqueues, the 100k run still spends `30.41s` in candidate search while
+  greedy descent is only `1.25s`, so the remaining ChromaDB build-time gap is
+  still dominated by candidate collection rather than top-layer descent.
 - Leave native online mutation for a separate future design after the
   batch-built read index path is closer to ChromaDB.
 
