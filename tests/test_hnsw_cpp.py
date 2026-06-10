@@ -133,8 +133,11 @@ def test_cpp_build_graph_returns_searchable_connections():
 
 def test_cpp_build_graph_wrapper_releases_gil_for_parallel_segments():
     source = Path("src/index/hnsw_cpp.pyx").read_text()
-    assert "CppBuildGraphResult cpp_build_graph" in source
-    assert "cpp_build_graph" in source and "nogil" in source
+    declaration_start = source.index("CppBuildGraphResult cpp_build_graph")
+    declaration_end = source.index("\n\n\ndef search_layer", declaration_start)
+    declaration = source[declaration_start:declaration_end]
+
+    assert ") except + nogil" in declaration
     assert "with nogil:" in source
 
 
