@@ -150,7 +150,7 @@ cdef extern from "hnsw_cpp_core.hpp" namespace "vectordb":
         int ef_construction,
         const string& metric,
         bool include_connections
-    ) except +
+    ) except + nogil
 
 
 def search_layer(
@@ -376,17 +376,19 @@ def build_graph(
         raise ValueError("levels length must match number of vectors")
 
     cdef string metric_cpp = metric.encode("utf-8")
-    cdef CppBuildGraphResult raw = cpp_build_graph(
-        <const float*> vectors_arr.data,
-        <int> vectors_arr.shape[0],
-        <int> vectors_arr.shape[1],
-        <const int*> levels_arr.data,
-        <int> levels_arr.shape[0],
-        max_connections,
-        ef_construction,
-        metric_cpp,
-        include_connections,
-    )
+    cdef CppBuildGraphResult raw
+    with nogil:
+        raw = cpp_build_graph(
+            <const float*> vectors_arr.data,
+            <int> vectors_arr.shape[0],
+            <int> vectors_arr.shape[1],
+            <const int*> levels_arr.data,
+            <int> levels_arr.shape[0],
+            max_connections,
+            ef_construction,
+            metric_cpp,
+            include_connections,
+        )
 
     cdef Py_ssize_t i
     cdef Py_ssize_t j

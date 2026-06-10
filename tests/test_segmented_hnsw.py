@@ -119,6 +119,43 @@ def test_segmented_hnsw_builds_contiguous_segments_and_merges_global_results():
     assert index._last_cpp_build_stats["distance_evaluations"] == 100
 
 
+def test_segmented_hnsw_uses_configured_build_thread_executor():
+    from src.index.segmented_hnsw import SegmentedHNSWIndex
+
+    created_workers = []
+
+    class RecordingExecutor:
+        def __init__(self, max_workers):
+            created_workers.append(max_workers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def map(self, func, items):
+            return [func(item) for item in items]
+
+    vectors = np.arange(24, dtype=np.float32).reshape(12, 2)
+    index = SegmentedHNSWIndex(
+        M=2,
+        ef_construction=8,
+        ef_search=6,
+        metric="euclidean",
+        segment_count=4,
+        build_threads=3,
+        segment_factory=FakeExactSegment,
+        executor_factory=RecordingExecutor,
+    )
+
+    index.build(vectors)
+
+    assert created_workers == [3]
+    assert index.segmented_build_stats["build_threads"] == 3
+    assert index.segment_sizes == [3, 3, 3, 3]
+
+
 def test_segmented_hnsw_search_batch_preserves_query_order_and_global_ids():
     from src.index.segmented_hnsw import SegmentedHNSWIndex
 

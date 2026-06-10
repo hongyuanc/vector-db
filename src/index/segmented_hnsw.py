@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable
 
@@ -96,6 +97,7 @@ class SegmentedHNSWIndex:
         segment_count: int = 2,
         build_threads: int = 1,
         segment_factory: Callable[..., HNSWIndex] = _default_segment_factory,
+        executor_factory=ThreadPoolExecutor,
     ):
         if segment_count <= 0:
             raise ValueError("segment_count must be positive")
@@ -112,6 +114,7 @@ class SegmentedHNSWIndex:
         self.segment_count = segment_count
         self.build_threads = build_threads
         self._segment_factory = segment_factory
+        self._executor_factory = executor_factory
 
         self.vectors: np.ndarray | None = None
         self.segments: list[HNSWSegment] = []
@@ -143,7 +146,13 @@ class SegmentedHNSWIndex:
 
         ranges = self._segment_ranges(len(self.vectors), self.segment_count)
         build_start = time.perf_counter()
-        self.segments = [self._build_one_segment(start, end) for start, end in ranges]
+        work_items = list(ranges)
+        if self.build_threads > 1 and len(work_items) > 1:
+            max_workers = min(self.build_threads, len(work_items))
+            with self._executor_factory(max_workers=max_workers) as executor:
+                self.segments = list(executor.map(self._build_one_segment_from_item, work_items))
+        else:
+            self.segments = [self._build_one_segment_from_item(item) for item in work_items]
         build_seconds = time.perf_counter() - build_start
 
         self.segment_offsets = [segment.start for segment in self.segments]
@@ -239,7 +248,8 @@ class SegmentedHNSWIndex:
             "total_graph_mb": round(total_bytes / bytes_per_mib, 4),
         }
 
-    def _build_one_segment(self, start: int, end: int) -> HNSWSegment:
+    def _build_one_segment_from_item(self, item: tuple[int, int]) -> HNSWSegment:
+        start, end = item
         segment_index = self._segment_factory(
             M=self.M,
             ef_construction=self.ef_construction,

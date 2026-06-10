@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -127,6 +129,13 @@ def test_cpp_build_graph_returns_searchable_connections():
     assert len(layer_zero["offsets"]) == len(vectors) + 1
     assert layer_zero["offsets"][0] == 0
     assert layer_zero["offsets"][-1] == len(layer_zero["neighbors"])
+
+
+def test_cpp_build_graph_wrapper_releases_gil_for_parallel_segments():
+    source = Path("src/index/hnsw_cpp.pyx").read_text()
+    assert "CppBuildGraphResult cpp_build_graph" in source
+    assert "cpp_build_graph" in source and "nogil" in source
+    assert "with nogil:" in source
 
 
 def test_cpp_build_graph_returns_phase_stats():
