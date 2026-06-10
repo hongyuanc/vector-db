@@ -1643,6 +1643,62 @@ Verification added:
   `98.60%`, and QPS `4768.0`, compared with ChromaDB build time `4.65s`,
   recall@10 `99.90%`, and QPS `6372.7`.
 
+## Bounded Build Search Enqueues
+
+What was there before: mutable-layer build search computed a distance for every
+newly visited neighbor, then pushed every visited neighbor into both the
+candidate frontier heap and the bounded result heap. That meant heap mutation
+work scaled with `visited_nodes`, even after the result set was already full and
+a newly visited neighbor was worse than the current worst retained result.
+
+What was implemented: after computing a neighbor distance, the C++ build search
+now checks the bounded result heap before enqueueing. If the result heap already
+contains `ef_construction` entries and the new distance is worse than the
+current worst result, the node remains counted as visited and distance-evaluated
+but is not pushed into either heap. Entry points still seed the search as
+before, and equal-distance ties are still allowed through so the ordering policy
+does not become stricter than the existing early-stop condition.
+
+Why this matters: this targets candidate-search overhead without changing HNSW
+parameters, graph storage, or public API behavior. It also makes the heap
+counters more useful: `visited_nodes` now measures graph exploration and
+`candidate_heap_pushes` / `result_heap_pushes` measure only nodes that can still
+participate in the bounded `ef_construction` frontier. This mirrors the standard
+HNSW rule that the search frontier only grows when a candidate can improve the
+current bounded result set.
+
+Measured result from the 10k random-vector benchmark:
+
+| Metric | Before Bounded Enqueue | Bounded Enqueue |
+|---|---:|---:|
+| Build Time | 2.9704s | 2.1981s |
+| C++ Distance Evaluations | 53141500 | 53141500 |
+| C++ Search Distance Evaluations | 31351236 | 31351236 |
+| C++ Visited Nodes | 31351236 | 31351236 |
+| C++ Candidate Heap Pushes | 31351236 | 8717962 |
+| C++ Result Heap Pushes | 31351236 | 8717962 |
+
+Before this change, every visited node was pushed into both heaps, so heap
+pushes matched visited nodes. The main win is reduced heap pressure: heap pushes
+dropped to about 27.8% of visited nodes on this benchmark. Distance evaluations
+and visited-node counts did not move on the random-vector shape, so the next
+larger validation should check whether SIFT1M 100k sees a larger
+candidate-search time reduction or only the same heap-mutation reduction. The
+structural counter reduction is more important than the 10k wall-clock number,
+because small local benchmark timings can vary between runs.
+
+Verification added:
+
+- `tests/test_hnsw_cpp.py` checks that a deterministic native build skips
+  unpromising heap candidates while preserving the relationship between visited
+  nodes and search distance evaluations.
+- Existing build-counter and benchmark schema tests now assert heap pushes are
+  positive and bounded by visited nodes instead of assuming every visited node is
+  enqueued.
+- A 10k random-vector benchmark reported build time `2.1981s`,
+  candidate-search time `1.4597s`, and `8,717,962` candidate/result heap pushes
+  against `31,351,236` visited nodes.
+
 ### Next Steps
 
 - Write the implementation plan for the C++ parity phase as small, testable,
@@ -1652,9 +1708,10 @@ Verification added:
   changes on the same benchmark shape.
 - Add an accuracy-focused benchmark slice that reports recall deltas across
   nearest-only versus heuristic construction on clustered data.
-- Optimize insertion-layer candidate search next. After reusable search heaps,
-  the 100k run still spends `35.30s` in candidate search, while greedy descent
-  is only `1.43s`.
+- Measure bounded build-search enqueues on SIFT1M 100k. After reusable search
+  heaps, the 100k run still spent `35.30s` in candidate search, while greedy
+  descent was only `1.43s`; the next decision should use the same large-data
+  benchmark to see whether heap-pressure reduction changes that bottleneck.
 - Leave native online mutation for a separate future design after the
   batch-built read index path is closer to ChromaDB.
 
