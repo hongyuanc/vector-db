@@ -137,11 +137,12 @@ def test_cpp_build_graph_wrapper_releases_gil_for_parallel_segments():
     declaration_end = source.index("\n\n\ndef search_layer", declaration_start)
     declaration = source[declaration_start:declaration_end]
     wrapper_start = source.index("def build_graph(")
-    wrapper = source[wrapper_start:]
+    native_call_end = source.index("\n    cdef Py_ssize_t i", wrapper_start)
+    native_call_block = source[wrapper_start:native_call_end]
 
     assert ") except + nogil" in declaration
-    nogil_start = wrapper.index("    with nogil:")
-    cpp_call_start = wrapper.index("        raw = cpp_build_graph(", nogil_start)
+    nogil_start = native_call_block.index("    with nogil:")
+    cpp_call_start = native_call_block.index("        raw = cpp_build_graph(", nogil_start)
     assert nogil_start < cpp_call_start
 
 
