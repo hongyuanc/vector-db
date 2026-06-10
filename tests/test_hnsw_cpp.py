@@ -136,9 +136,13 @@ def test_cpp_build_graph_wrapper_releases_gil_for_parallel_segments():
     declaration_start = source.index("CppBuildGraphResult cpp_build_graph")
     declaration_end = source.index("\n\n\ndef search_layer", declaration_start)
     declaration = source[declaration_start:declaration_end]
+    wrapper_start = source.index("def build_graph(")
+    wrapper = source[wrapper_start:]
 
     assert ") except + nogil" in declaration
-    assert "with nogil:" in source
+    nogil_start = wrapper.index("    with nogil:")
+    cpp_call_start = wrapper.index("        raw = cpp_build_graph(", nogil_start)
+    assert nogil_start < cpp_call_start
 
 
 def test_cpp_build_graph_returns_phase_stats():
@@ -628,6 +632,69 @@ def test_hnsw_build_uses_cpp_batch_builder_when_available(monkeypatch):
     assert 0 in index._cpp_graph_cache
     assert np.array_equal(index._cpp_graph_cache[0][0], np.array([0, 1, 3, 4], dtype=np.int32))
     assert np.array_equal(index._cpp_graph_cache[0][1], np.array([1, 0, 2, 1], dtype=np.int32))
+
+
+def test_hnsw_build_uses_provided_levels_for_cpp_builder(monkeypatch):
+    import src.index.hnsw as hnsw_module
+
+    calls = []
+
+    class FakeCppModule:
+        def build_graph(
+            self,
+            vectors,
+            levels,
+            max_connections,
+            ef_construction,
+            metric,
+            include_connections=True,
+        ):
+            calls.append({"levels": levels.copy(), "dtype": levels.dtype})
+            return {
+                "entry_point": 1,
+                "max_layer": 2,
+                "levels": levels.tolist(),
+                "connections": [],
+                "layers": {},
+            }
+
+    def fail_assign_layer(self):
+        raise AssertionError("provided build levels should avoid RNG sampling")
+
+    monkeypatch.setattr(hnsw_module, "CPP_AVAILABLE", True)
+    monkeypatch.setattr(hnsw_module, "hnsw_cpp", FakeCppModule())
+    monkeypatch.setattr(HNSWIndex, "_assign_layer", fail_assign_layer)
+
+    index = HNSWIndex(M=2, ef_construction=8, metric="euclidean")
+    vectors = np.array(
+        [
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.2, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+    index.build(vectors, levels=np.array([0, 2, 1], dtype=np.int64))
+
+    assert calls[0]["dtype"] == np.dtype("int32")
+    assert calls[0]["levels"].tolist() == [0, 2, 1]
+    assert [index.nodes[i].layer for i in range(3)] == [0, 2, 1]
+    assert index.max_layer == 2
+
+
+def test_hnsw_build_rejects_invalid_provided_levels():
+    index = HNSWIndex(M=2, ef_construction=8, metric="euclidean")
+    vectors = np.arange(6, dtype=np.float32).reshape(3, 2)
+
+    with pytest.raises(ValueError, match="levels length must match number of vectors"):
+        index.build(vectors, levels=np.array([0, 1], dtype=np.int32))
+
+    with pytest.raises(ValueError, match="levels must be a 1D array"):
+        index.build(vectors, levels=np.array([[0, 1, 2]], dtype=np.int32))
+
+    with pytest.raises(ValueError, match="levels must be non-negative"):
+        index.build(vectors, levels=np.array([0, -1, 0], dtype=np.int32))
 
 
 def test_hnsw_build_reuses_cpp_builder_cache(monkeypatch):

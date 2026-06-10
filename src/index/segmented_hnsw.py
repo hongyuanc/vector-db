@@ -7,7 +7,7 @@ from typing import Callable
 
 import numpy as np
 
-from src.index.hnsw import HNSWIndex
+from src.index.hnsw import HNSWIndex, sample_hnsw_levels
 
 
 CPP_SUM_KEYS = {
@@ -146,7 +146,8 @@ class SegmentedHNSWIndex:
 
         ranges = self._segment_ranges(len(self.vectors), self.segment_count)
         build_start = time.perf_counter()
-        work_items = list(ranges)
+        levels = sample_hnsw_levels(len(self.vectors), self.ml)
+        work_items = [(start, end, levels[start:end]) for start, end in ranges]
         if self.build_threads > 1 and len(work_items) > 1:
             max_workers = min(self.build_threads, len(work_items))
             with self._executor_factory(max_workers=max_workers) as executor:
@@ -248,8 +249,8 @@ class SegmentedHNSWIndex:
             "total_graph_mb": round(total_bytes / bytes_per_mib, 4),
         }
 
-    def _build_one_segment_from_item(self, item: tuple[int, int]) -> HNSWSegment:
-        start, end = item
+    def _build_one_segment_from_item(self, item: tuple[int, int, np.ndarray]) -> HNSWSegment:
+        start, end, levels = item
         segment_index = self._segment_factory(
             M=self.M,
             ef_construction=self.ef_construction,
@@ -258,7 +259,10 @@ class SegmentedHNSWIndex:
             metric=self.metric,
         )
         build_start = time.perf_counter()
-        segment_index.build(self.vectors[start:end])
+        if isinstance(segment_index, HNSWIndex):
+            segment_index.build(self.vectors[start:end], levels=levels)
+        else:
+            segment_index.build(self.vectors[start:end])
         build_seconds = time.perf_counter() - build_start
         return HNSWSegment(start=start, end=end, index=segment_index, build_seconds=build_seconds)
 

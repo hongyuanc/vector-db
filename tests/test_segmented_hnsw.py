@@ -156,6 +156,105 @@ def test_segmented_hnsw_uses_configured_build_thread_executor():
     assert index.segment_sizes == [3, 3, 3, 3]
 
 
+def test_segmented_hnsw_caps_build_thread_workers_to_segment_count():
+    from src.index.segmented_hnsw import SegmentedHNSWIndex
+
+    created_workers = []
+
+    class RecordingExecutor:
+        def __init__(self, max_workers):
+            created_workers.append(max_workers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def map(self, func, items):
+            return [func(item) for item in items]
+
+    vectors = np.arange(12, dtype=np.float32).reshape(6, 2)
+    index = SegmentedHNSWIndex(
+        segment_count=3,
+        build_threads=10,
+        segment_factory=FakeExactSegment,
+        executor_factory=RecordingExecutor,
+    )
+
+    index.build(vectors)
+
+    assert created_workers == [3]
+    assert index.segment_sizes == [2, 2, 2]
+
+
+def test_segmented_hnsw_precomputes_levels_before_executor_and_passes_to_hnsw_segments(
+    monkeypatch,
+):
+    import src.index.segmented_hnsw as segmented_module
+    from src.index.hnsw import HNSWIndex
+    from src.index.segmented_hnsw import SegmentedHNSWIndex
+
+    events = []
+
+    class RecordingHNSWSegment(HNSWIndex):
+        recorded_levels = []
+
+        def build(self, vectors, levels=None):
+            self.vectors = np.asarray(vectors, dtype=np.float32)
+            level_list = None if levels is None else levels.tolist()
+            self.recorded_levels.append(level_list)
+            events.append(("build", level_list))
+
+    class RecordingExecutor:
+        def __init__(self, max_workers):
+            self.max_workers = max_workers
+
+        def __enter__(self):
+            events.append(("executor_enter", self.max_workers))
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def map(self, func, items):
+            work_items = list(items)
+            events.append(("executor_map", [(item[0], item[1]) for item in work_items]))
+            return [func(item) for item in work_items]
+
+    def record_sampled_levels(count, ml):
+        events.append(("sample_levels", count, ml))
+        return np.arange(count, dtype=np.int32)
+
+    RecordingHNSWSegment.recorded_levels = []
+    monkeypatch.setattr(
+        segmented_module,
+        "sample_hnsw_levels",
+        record_sampled_levels,
+        raising=False,
+    )
+
+    vectors = np.arange(12, dtype=np.float32).reshape(6, 2)
+    index = SegmentedHNSWIndex(
+        segment_count=3,
+        build_threads=2,
+        segment_factory=RecordingHNSWSegment,
+        executor_factory=RecordingExecutor,
+    )
+
+    index.build(vectors)
+
+    assert events[0][0] == "sample_levels"
+    assert events[1:] == [
+        ("executor_enter", 2),
+        ("executor_map", [(0, 2), (2, 4), (4, 6)]),
+        ("build", [0, 1]),
+        ("build", [2, 3]),
+        ("build", [4, 5]),
+    ]
+    assert RecordingHNSWSegment.recorded_levels == [[0, 1], [2, 3], [4, 5]]
+
+
 def test_segmented_hnsw_search_batch_preserves_query_order_and_global_ids():
     from src.index.segmented_hnsw import SegmentedHNSWIndex
 

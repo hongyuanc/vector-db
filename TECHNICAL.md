@@ -1764,6 +1764,14 @@ segmented path, then add build parallelism once the segment boundary is tested.
 SIFT1M 100k should be benchmarked at `1`, `2`, `4`, and `8` segments before
 deciding whether this becomes a recommended build mode.
 
+Implementation note: the segmented build path now precomputes HNSW levels
+before dispatching segment builds to worker threads, then passes the appropriate
+level slice into each `HNSWIndex.build()` call. This keeps seeded builds
+deterministic because NumPy's process-global RNG is consumed in one sequential
+section instead of inside scheduler-dependent worker execution. The Cython
+wrapper also releases the GIL around the native `cpp_build_graph()` call, so the
+thread pool can overlap native per-segment construction.
+
 ---
 
 ## Future Improvements

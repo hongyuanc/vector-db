@@ -54,6 +54,25 @@ class HNSWNode:
     connections: dict[int, set[int]] = field(default_factory=lambda: {})
 
 
+def _sample_hnsw_level(ml: float) -> int:
+    """
+    Sample one HNSW layer using exponential decay.
+
+    Uses l = floor(-ln(uniform(0,1)) * ml), matching HNSWIndex._assign_layer().
+    """
+    uniform_random = np.random.uniform(0, 1)
+    if uniform_random < 1e-9:
+        uniform_random = 1e-9
+    return int(-np.log(uniform_random) * ml)
+
+
+def sample_hnsw_levels(count: int, ml: float) -> np.ndarray:
+    """Sample HNSW levels in the same order and formula as repeated insertions."""
+    if count < 0:
+        raise ValueError("count must be non-negative")
+    return np.asarray([_sample_hnsw_level(ml) for _ in range(count)], dtype=np.int32)
+
+
 class HNSWIndex(VectorIndex):
     """
     HNSW index for approximate nearest neighbor search.
@@ -141,19 +160,9 @@ class HNSWIndex(VectorIndex):
 
         Uses exponential decay: l = floor(-ln(uniform(0,1)) * ml)
         """
-        # Generate random float in (0, 1) - avoid exactly 0 which would cause ln(0) = -inf
-        uniform_random = np.random.uniform(0, 1)
+        return _sample_hnsw_level(self.ml)
 
-        # Avoid edge case of exactly 0
-        if uniform_random < 1e-9:
-            uniform_random = 1e-9
-
-        # Apply exponential decay formula
-        layer = int(-np.log(uniform_random) * self.ml)
-
-        return layer
-
-    def build(self, vectors: np.ndarray) -> None:
+    def build(self, vectors: np.ndarray, levels: np.ndarray | None = None) -> None:
         """
         Build HNSW index.
 
@@ -185,14 +194,17 @@ class HNSWIndex(VectorIndex):
 
         # Insert each vector into the graph
         total = len(vectors)
+        build_levels = self._prepare_build_levels(levels, total)
         if total == 0:
             return
 
+        if build_levels is None:
+            build_levels = np.asarray([self._assign_layer() for _ in range(total)], dtype=np.int32)
+
         if CPP_AVAILABLE and hnsw_cpp is not None and hasattr(hnsw_cpp, "build_graph"):
-            levels = np.asarray([self._assign_layer() for _ in range(total)], dtype=np.int32)
             graph = hnsw_cpp.build_graph(
                 self._get_vectors_f32(),
-                levels,
+                build_levels,
                 self.M,
                 self.ef_construction,
                 self.metric,
@@ -201,7 +213,7 @@ class HNSWIndex(VectorIndex):
             self._load_cpp_build_result(graph)
             print(f"Progress: {total:,}/{total:,} vectors (100.0%)", flush=True)
         else:
-            self._build_with_python_insert(vectors)
+            self._build_with_python_insert(vectors, levels=build_levels)
 
         # Pre-build cache for Cython if available
         if (
@@ -221,13 +233,26 @@ class HNSWIndex(VectorIndex):
         ):
             self._build_cpp_cache()
 
-    def _build_with_python_insert(self, vectors: np.ndarray) -> None:
+    def _prepare_build_levels(self, levels: np.ndarray | None, total: int) -> np.ndarray | None:
+        if levels is None:
+            return None
+
+        levels_array = np.asarray(levels)
+        if levels_array.ndim != 1:
+            raise ValueError("levels must be a 1D array")
+        if levels_array.shape[0] != total:
+            raise ValueError("levels length must match number of vectors")
+        if np.any(levels_array < 0):
+            raise ValueError("levels must be non-negative")
+        return np.ascontiguousarray(levels_array, dtype=np.int32)
+
+    def _build_with_python_insert(self, vectors: np.ndarray, levels: np.ndarray) -> None:
         """Build the graph through the incremental Python/Cython insert path."""
         total = len(vectors)
         log_interval = max(1, total // 20)  # Log 20 times during build
 
         for i in range(total):
-            self.insert(vectors[i], vector_id=i)
+            self.insert(vectors[i], vector_id=i, layer=int(levels[i]))
 
             # Progress logging
             if (i + 1) % log_interval == 0 or (i + 1) == total:
@@ -434,7 +459,7 @@ class HNSWIndex(VectorIndex):
 
         self._cpp_graph_cache = graph_cache
 
-    def insert(self, vector: np.ndarray, vector_id: int) -> None:
+    def insert(self, vector: np.ndarray, vector_id: int, layer: int | None = None) -> None:
         """
         Insert a vector into the HNSW graph.
 
@@ -455,8 +480,10 @@ class HNSWIndex(VectorIndex):
         self._cpp_graph_cache = None
         self._vectors_f32_cache = None
 
-        # Assign layer for new node using exponential decay
-        node_layer = self._assign_layer()
+        # Assign layer for new node using exponential decay unless build() provided one.
+        node_layer = self._assign_layer() if layer is None else int(layer)
+        if node_layer < 0:
+            raise ValueError("layer must be non-negative")
 
         # Create new node
         new_node = HNSWNode(vector_id=vector_id, layer=node_layer)
