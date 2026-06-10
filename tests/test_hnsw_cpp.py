@@ -172,6 +172,55 @@ def test_cpp_build_graph_returns_phase_stats():
     assert stats["csr_export_seconds"] >= 0.0
 
 
+def test_cpp_build_graph_reports_detailed_build_counters():
+    from src.index import hnsw_cpp
+
+    vectors = np.array(
+        [
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.2, 0.0],
+            [0.3, 0.0],
+            [2.0, 2.0],
+            [2.1, 2.0],
+            [2.2, 2.0],
+        ],
+        dtype=np.float32,
+    )
+    levels = np.array([0, 1, 0, 0, 1, 0, 0], dtype=np.int32)
+
+    graph = hnsw_cpp.build_graph(
+        vectors=vectors,
+        levels=levels,
+        max_connections=2,
+        ef_construction=4,
+        metric="euclidean",
+        include_connections=False,
+    )
+
+    stats = graph["build_stats"]
+    assert stats["distance_evaluations"] > 0
+    assert stats["search_distance_evaluations"] > 0
+    assert stats["neighbor_selection_distance_evaluations"] > 0
+    assert stats["prune_distance_evaluations"] >= 0
+    assert stats["distance_evaluations"] == (
+        stats["search_distance_evaluations"]
+        + stats["neighbor_selection_distance_evaluations"]
+        + stats["prune_distance_evaluations"]
+    )
+    assert stats["visited_nodes"] == stats["search_distance_evaluations"]
+    assert stats["max_visited_nodes_per_search"] > 0
+    assert stats["candidate_heap_pushes"] >= stats["visited_nodes"]
+    assert stats["result_heap_pushes"] >= stats["visited_nodes"]
+    assert stats["neighbor_selection_calls"] > 0
+    assert stats["selected_degree_total"] > 0
+    assert stats["average_selected_degree"] > 0.0
+    assert stats["max_selected_degree"] <= 4
+    assert stats["prune_calls"] >= 0
+    assert stats["max_prune_input_size"] >= 0
+    assert stats["average_prune_input_size"] >= 0.0
+
+
 def test_cpp_build_graph_reuses_visited_scratch():
     from src.index import hnsw_cpp
 
@@ -385,6 +434,22 @@ def test_hnsw_build_stores_cpp_build_stats(monkeypatch):
                     "uses_heuristic_reverse_pruning": False,
                     "adjacency_layers_allocated": 2,
                     "max_observed_degree": 1,
+                    "distance_evaluations": 12,
+                    "search_distance_evaluations": 8,
+                    "neighbor_selection_distance_evaluations": 3,
+                    "prune_distance_evaluations": 1,
+                    "visited_nodes": 8,
+                    "max_visited_nodes_per_search": 4,
+                    "candidate_heap_pushes": 8,
+                    "result_heap_pushes": 8,
+                    "neighbor_selection_calls": 1,
+                    "selected_degree_total": 2,
+                    "average_selected_degree": 2.0,
+                    "max_selected_degree": 2,
+                    "prune_calls": 1,
+                    "prune_input_total": 3,
+                    "average_prune_input_size": 3.0,
+                    "max_prune_input_size": 3,
                 },
             }
 
@@ -428,6 +493,22 @@ def test_hnsw_build_stores_cpp_build_stats(monkeypatch):
         "uses_heuristic_reverse_pruning": False,
         "adjacency_layers_allocated": 2,
         "max_observed_degree": 1,
+        "distance_evaluations": 12,
+        "search_distance_evaluations": 8,
+        "neighbor_selection_distance_evaluations": 3,
+        "prune_distance_evaluations": 1,
+        "visited_nodes": 8,
+        "max_visited_nodes_per_search": 4,
+        "candidate_heap_pushes": 8,
+        "result_heap_pushes": 8,
+        "neighbor_selection_calls": 1,
+        "selected_degree_total": 2,
+        "average_selected_degree": 2.0,
+        "max_selected_degree": 2,
+        "prune_calls": 1,
+        "prune_input_total": 3,
+        "average_prune_input_size": 3.0,
+        "max_prune_input_size": 3,
     }
 
 
