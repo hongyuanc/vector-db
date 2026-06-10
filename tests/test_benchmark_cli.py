@@ -37,6 +37,34 @@ def test_run_benchmark_suite_returns_structured_metrics():
     metrics = result["metrics"]
     assert metrics["build_time_seconds"] >= 0
     assert metrics["vectors_per_second"] > 0
+    assert set(metrics["cpp_build_stats"]) == {
+        "vectors",
+        "dimensions",
+        "max_layer",
+        "directed_edges",
+        "total_seconds",
+        "construction_seconds",
+        "search_seconds",
+        "greedy_search_seconds",
+        "candidate_search_seconds",
+        "prune_seconds",
+        "csr_export_seconds",
+        "uses_squared_l2",
+        "uses_float_l2_accumulation",
+        "search_calls",
+        "greedy_search_calls",
+        "candidate_search_calls",
+        "visited_resizes",
+        "uses_reusable_search_heaps",
+        "search_heap_resizes",
+        "uses_bounded_adjacency",
+        "uses_heuristic_neighbors",
+        "uses_heuristic_reverse_pruning",
+        "adjacency_layers_allocated",
+        "max_observed_degree",
+    }
+    assert metrics["cpp_build_stats"]["vectors"] == 80
+    assert metrics["cpp_build_stats"]["dimensions"] == 8
     assert metrics["qps"] > 0
     assert 0.0 <= metrics["recall_at_k"] <= 1.0
     assert set(metrics["latency_ms"]) == {"p50", "p95", "p99", "average"}
@@ -129,5 +157,7 @@ def test_main_writes_json_and_markdown_reports(tmp_path):
     assert "Recall@3" in markdown
     assert "p99 Latency" in markdown
     assert "Graph Total" in markdown
+    assert "C++ Build Total" in markdown
+    assert "C++ Visited Resizes" in markdown
     assert "Compact Save Time" in markdown
     assert "Materialized Save Time" in markdown

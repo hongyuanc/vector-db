@@ -37,6 +37,32 @@ HNSWIndex = _hnsw_module.HNSWIndex
 
 
 BYTES_PER_MIB = 1024 * 1024
+CPP_BUILD_STATS_KEYS = (
+    "vectors",
+    "dimensions",
+    "max_layer",
+    "directed_edges",
+    "total_seconds",
+    "construction_seconds",
+    "search_seconds",
+    "greedy_search_seconds",
+    "candidate_search_seconds",
+    "prune_seconds",
+    "csr_export_seconds",
+    "uses_squared_l2",
+    "uses_float_l2_accumulation",
+    "search_calls",
+    "greedy_search_calls",
+    "candidate_search_calls",
+    "visited_resizes",
+    "uses_reusable_search_heaps",
+    "search_heap_resizes",
+    "uses_bounded_adjacency",
+    "uses_heuristic_neighbors",
+    "uses_heuristic_reverse_pruning",
+    "adjacency_layers_allocated",
+    "max_observed_degree",
+)
 
 
 def _generate_random_dataset(
@@ -264,6 +290,14 @@ def _estimate_graph_memory(index: HNSWIndex) -> dict[str, int | float]:
     }
 
 
+def _normalize_cpp_build_stats(stats: dict[str, Any] | None) -> dict[str, int | float | bool | None]:
+    """Return a stable benchmark schema for native C++ build instrumentation."""
+    if not stats:
+        return {key: None for key in CPP_BUILD_STATS_KEYS}
+
+    return {key: stats.get(key) for key in CPP_BUILD_STATS_KEYS}
+
+
 def _unavailable_persistence_result() -> dict[str, Any]:
     return {
         "available": False,
@@ -407,6 +441,7 @@ def run_benchmark_suite(
 
     rss_after = _peak_rss_mb()
     graph_memory = _estimate_graph_memory(index)
+    cpp_build_stats = _normalize_cpp_build_stats(index._last_cpp_build_stats)
     persistence = _benchmark_persistence(index)
     memory: dict[str, Any] = {
         "vector_data_mb": round(float(vectors.nbytes) / BYTES_PER_MIB, 2),
@@ -442,6 +477,7 @@ def run_benchmark_suite(
         "metrics": {
             "build_time_seconds": round(build_time, 6),
             "vectors_per_second": round(len(vectors) / build_time, 2) if build_time else 0.0,
+            "cpp_build_stats": cpp_build_stats,
             "search_time_seconds": round(search_time, 6),
             "qps": round(len(queries) / search_time, 2) if search_time else 0.0,
             "latency_ms": _percentiles(latencies_ms),
@@ -467,6 +503,7 @@ def format_markdown_report(result: dict[str, Any]) -> str:
     metrics = result["metrics"]
     latency = metrics["latency_ms"]
     memory = metrics["memory"]
+    cpp_build_stats = metrics["cpp_build_stats"]
     persistence = metrics["persistence"]
     compact = persistence["compact"]
     materialized = persistence["materialized"]
@@ -506,6 +543,26 @@ def format_markdown_report(result: dict[str, Any]) -> str:
             "|---|---:|",
             f"| Build Time | {metrics['build_time_seconds']:.4f}s |",
             f"| Build Throughput | {metrics['vectors_per_second']:.2f} vectors/sec |",
+            f"| C++ Build Total | {_format_optional_seconds(cpp_build_stats['total_seconds'])} |",
+            f"| C++ Build Construction | {_format_optional_seconds(cpp_build_stats['construction_seconds'])} |",
+            f"| C++ Build Search | {_format_optional_seconds(cpp_build_stats['search_seconds'])} |",
+            f"| C++ Greedy Search | {_format_optional_seconds(cpp_build_stats['greedy_search_seconds'])} |",
+            f"| C++ Candidate Search | {_format_optional_seconds(cpp_build_stats['candidate_search_seconds'])} |",
+            f"| C++ Build Prune | {_format_optional_seconds(cpp_build_stats['prune_seconds'])} |",
+            f"| C++ CSR Export | {_format_optional_seconds(cpp_build_stats['csr_export_seconds'])} |",
+            f"| C++ Float L2 Accumulation | {cpp_build_stats['uses_float_l2_accumulation']} |",
+            f"| C++ Directed Edges | {cpp_build_stats['directed_edges']} |",
+            f"| C++ Build Search Calls | {cpp_build_stats['search_calls']} |",
+            f"| C++ Greedy Search Calls | {cpp_build_stats['greedy_search_calls']} |",
+            f"| C++ Candidate Search Calls | {cpp_build_stats['candidate_search_calls']} |",
+            f"| C++ Visited Resizes | {cpp_build_stats['visited_resizes']} |",
+            f"| C++ Reusable Search Heaps | {cpp_build_stats['uses_reusable_search_heaps']} |",
+            f"| C++ Search Heap Resizes | {cpp_build_stats['search_heap_resizes']} |",
+            f"| C++ Bounded Adjacency | {cpp_build_stats['uses_bounded_adjacency']} |",
+            f"| C++ Heuristic Neighbors | {cpp_build_stats['uses_heuristic_neighbors']} |",
+            f"| C++ Heuristic Reverse Pruning | {cpp_build_stats['uses_heuristic_reverse_pruning']} |",
+            f"| C++ Adjacency Layers | {cpp_build_stats['adjacency_layers_allocated']} |",
+            f"| C++ Max Observed Degree | {cpp_build_stats['max_observed_degree']} |",
             f"| QPS | {metrics['qps']:.2f} |",
             f"| Average Latency | {latency['average']:.4f} ms |",
             f"| p50 Latency | {latency['p50']:.4f} ms |",

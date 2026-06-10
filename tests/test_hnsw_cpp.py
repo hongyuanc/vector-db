@@ -129,6 +129,185 @@ def test_cpp_build_graph_returns_searchable_connections():
     assert layer_zero["offsets"][-1] == len(layer_zero["neighbors"])
 
 
+def test_cpp_build_graph_returns_phase_stats():
+    from src.index import hnsw_cpp
+
+    vectors = np.array(
+        [
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.2, 0.0],
+            [3.0, 3.0],
+            [3.1, 3.0],
+        ],
+        dtype=np.float32,
+    )
+    levels = np.array([0, 1, 0, 0, 0], dtype=np.int32)
+
+    graph = hnsw_cpp.build_graph(
+        vectors=vectors,
+        levels=levels,
+        max_connections=2,
+        ef_construction=4,
+        metric="euclidean",
+        include_connections=False,
+    )
+
+    stats = graph["build_stats"]
+    assert stats["vectors"] == len(vectors)
+    assert stats["dimensions"] == vectors.shape[1]
+    assert stats["max_layer"] == graph["max_layer"]
+    assert stats["directed_edges"] == sum(
+        int(layer["neighbors"].size) for layer in graph["layers"].values()
+    )
+    assert stats["total_seconds"] >= 0.0
+    assert stats["construction_seconds"] >= 0.0
+    assert stats["search_seconds"] >= 0.0
+    assert stats["greedy_search_seconds"] >= 0.0
+    assert stats["candidate_search_seconds"] >= 0.0
+    assert stats["search_seconds"] == pytest.approx(
+        stats["greedy_search_seconds"] + stats["candidate_search_seconds"]
+    )
+    assert stats["prune_seconds"] >= 0.0
+    assert stats["csr_export_seconds"] >= 0.0
+
+
+def test_cpp_build_graph_reuses_visited_scratch():
+    from src.index import hnsw_cpp
+
+    vectors = np.array(
+        [
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.2, 0.0],
+            [0.3, 0.0],
+            [0.4, 0.0],
+            [0.5, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    levels = np.zeros(len(vectors), dtype=np.int32)
+
+    graph = hnsw_cpp.build_graph(
+        vectors=vectors,
+        levels=levels,
+        max_connections=2,
+        ef_construction=4,
+        metric="euclidean",
+        include_connections=False,
+    )
+
+    stats = graph["build_stats"]
+    assert stats["search_calls"] == len(vectors) - 1
+    assert stats["greedy_search_calls"] == 0
+    assert stats["candidate_search_calls"] == len(vectors) - 1
+    assert stats["search_calls"] == stats["greedy_search_calls"] + stats["candidate_search_calls"]
+    assert stats["visited_resizes"] == 1
+    assert stats["visited_resizes"] < stats["search_calls"]
+    assert stats["uses_reusable_search_heaps"] is True
+    assert stats["search_heap_resizes"] > 0
+    assert stats["search_heap_resizes"] < stats["search_calls"] * 2
+
+
+def test_cpp_build_graph_reports_bounded_adjacency_layout():
+    from src.index import hnsw_cpp
+
+    vectors = np.array(
+        [
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.2, 0.0],
+            [0.3, 0.0],
+            [2.0, 2.0],
+            [2.1, 2.0],
+        ],
+        dtype=np.float32,
+    )
+    levels = np.array([0, 1, 0, 2, 0, 0], dtype=np.int32)
+    max_connections = 2
+
+    graph = hnsw_cpp.build_graph(
+        vectors=vectors,
+        levels=levels,
+        max_connections=max_connections,
+        ef_construction=4,
+        metric="euclidean",
+        include_connections=True,
+    )
+
+    stats = graph["build_stats"]
+    assert stats["uses_bounded_adjacency"] is True
+    assert stats["uses_heuristic_neighbors"] is True
+    assert stats["uses_heuristic_reverse_pruning"] is False
+    assert stats["adjacency_layers_allocated"] >= int(np.sum(levels + 1))
+    assert stats["adjacency_layers_allocated"] <= len(vectors) * (graph["max_layer"] + 1)
+    assert stats["max_observed_degree"] <= max_connections * 2
+
+    for node_id, layer, neighbors in graph["connections"]:
+        expected_limit = max_connections * 2 if layer == 0 else max_connections
+        assert len(neighbors) <= expected_limit, (node_id, layer, neighbors)
+
+
+def test_cpp_select_heuristic_neighbors_prefers_diverse_euclidean_neighbors():
+    from src.index import hnsw_cpp
+
+    vectors = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.1, 0.0],
+            [0.0, 1.2],
+        ],
+        dtype=np.float32,
+    )
+
+    selected = hnsw_cpp.select_heuristic_neighbors(
+        vectors=vectors,
+        node_id=0,
+        candidate_ids=[1, 2, 3],
+        max_connections=2,
+        metric="euclidean",
+    )
+
+    assert selected == [1, 3]
+
+
+def test_cpp_build_graph_reports_squared_l2_mode_for_euclidean():
+    from src.index import hnsw_cpp
+
+    vectors = np.array(
+        [
+            [0.0, 0.0],
+            [3.0, 4.0],
+            [6.0, 8.0],
+        ],
+        dtype=np.float32,
+    )
+    levels = np.array([0, 0, 0], dtype=np.int32)
+
+    euclidean_graph = hnsw_cpp.build_graph(
+        vectors=vectors,
+        levels=levels,
+        max_connections=2,
+        ef_construction=4,
+        metric="euclidean",
+        include_connections=False,
+    )
+    assert euclidean_graph["build_stats"]["uses_squared_l2"] is True
+    assert euclidean_graph["build_stats"]["uses_float_l2_accumulation"] is True
+
+    cosine_graph = hnsw_cpp.build_graph(
+        vectors=vectors,
+        levels=levels,
+        max_connections=2,
+        ef_construction=4,
+        metric="cosine",
+        include_connections=False,
+    )
+    assert cosine_graph["build_stats"]["uses_squared_l2"] is False
+    assert cosine_graph["build_stats"]["uses_float_l2_accumulation"] is False
+
+
 def test_cpp_build_graph_can_skip_connection_rows():
     from src.index import hnsw_cpp
 
@@ -155,6 +334,101 @@ def test_cpp_build_graph_can_skip_connection_rows():
 
     assert graph["connections"] == []
     assert graph["layers"][0]["neighbors"].size > 0
+
+
+def test_hnsw_build_stores_cpp_build_stats(monkeypatch):
+    import src.index.hnsw as hnsw_module
+
+    class FakeCppModule:
+        def build_graph(
+            self,
+            vectors,
+            levels,
+            max_connections,
+            ef_construction,
+            metric,
+            include_connections=True,
+        ):
+            return {
+                "entry_point": 0,
+                "max_layer": 0,
+                "levels": [0, 0],
+                "connections": [],
+                "layers": {
+                    0: {
+                        "offsets": np.array([0, 1, 2], dtype=np.int32),
+                        "neighbors": np.array([1, 0], dtype=np.int32),
+                    },
+                },
+                "build_stats": {
+                    "vectors": 2,
+                    "dimensions": 2,
+                    "max_layer": 0,
+                    "directed_edges": 2,
+                    "total_seconds": 0.25,
+                    "construction_seconds": 0.2,
+                    "search_seconds": 0.15,
+                    "greedy_search_seconds": 0.0,
+                    "candidate_search_seconds": 0.15,
+                    "prune_seconds": 0.01,
+                    "csr_export_seconds": 0.05,
+                    "uses_squared_l2": True,
+                    "uses_float_l2_accumulation": True,
+                    "search_calls": 1,
+                    "greedy_search_calls": 0,
+                    "candidate_search_calls": 1,
+                    "visited_resizes": 1,
+                    "uses_reusable_search_heaps": True,
+                    "search_heap_resizes": 2,
+                    "uses_bounded_adjacency": True,
+                    "uses_heuristic_neighbors": True,
+                    "uses_heuristic_reverse_pruning": False,
+                    "adjacency_layers_allocated": 2,
+                    "max_observed_degree": 1,
+                },
+            }
+
+    monkeypatch.setattr(hnsw_module, "CPP_AVAILABLE", True)
+    monkeypatch.setattr(hnsw_module, "hnsw_cpp", FakeCppModule())
+    monkeypatch.setattr(HNSWIndex, "_assign_layer", lambda self: 0)
+
+    index = HNSWIndex(M=2, ef_construction=4, metric="euclidean")
+    vectors = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+    index.build(vectors)
+
+    assert index._last_cpp_build_stats == {
+        "vectors": 2,
+        "dimensions": 2,
+        "max_layer": 0,
+        "directed_edges": 2,
+        "total_seconds": 0.25,
+        "construction_seconds": 0.2,
+        "search_seconds": 0.15,
+        "greedy_search_seconds": 0.0,
+        "candidate_search_seconds": 0.15,
+        "prune_seconds": 0.01,
+        "csr_export_seconds": 0.05,
+        "uses_squared_l2": True,
+        "uses_float_l2_accumulation": True,
+        "search_calls": 1,
+        "greedy_search_calls": 0,
+        "candidate_search_calls": 1,
+        "visited_resizes": 1,
+        "uses_reusable_search_heaps": True,
+        "search_heap_resizes": 2,
+        "uses_bounded_adjacency": True,
+        "uses_heuristic_neighbors": True,
+        "uses_heuristic_reverse_pruning": False,
+        "adjacency_layers_allocated": 2,
+        "max_observed_degree": 1,
+    }
 
 
 def test_hnsw_build_uses_cpp_batch_builder_when_available(monkeypatch):

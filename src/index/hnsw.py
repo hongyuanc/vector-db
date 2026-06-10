@@ -115,6 +115,7 @@ class HNSWIndex(VectorIndex):
         self._cpp_graph_cache: dict = None
         self._vectors_f32_cache: np.ndarray = None
         self._python_graph_materialized = True
+        self._last_cpp_build_stats: dict | None = None
 
     @property
     def graph_storage_mode(self) -> str:
@@ -180,6 +181,7 @@ class HNSWIndex(VectorIndex):
         self._cpp_graph_cache = None
         self._vectors_f32_cache = None
         self._python_graph_materialized = True
+        self._last_cpp_build_stats = None
 
         # Insert each vector into the graph
         total = len(vectors)
@@ -234,6 +236,7 @@ class HNSWIndex(VectorIndex):
 
     def _load_cpp_build_result(self, graph: dict) -> None:
         """Load a C++ batch build result without eagerly copying Python edges."""
+        self._last_cpp_build_stats = graph.get("build_stats")
         levels = graph["levels"]
         self.nodes = {
             vector_id: HNSWNode(vector_id=vector_id, layer=int(layer))

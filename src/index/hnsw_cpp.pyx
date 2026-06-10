@@ -38,12 +38,39 @@ cdef extern from "hnsw_cpp_core.hpp" namespace "vectordb":
         const int* neighbors
         int neighbors_len
 
+    cdef cppclass CppBuildStats "vectordb::BuildStats":
+        int vectors
+        int dimensions
+        int max_layer
+        long long directed_edges
+        double total_seconds
+        double construction_seconds
+        double search_seconds
+        double greedy_search_seconds
+        double candidate_search_seconds
+        double prune_seconds
+        double csr_export_seconds
+        bool uses_squared_l2
+        bool uses_float_l2_accumulation
+        int search_calls
+        int greedy_search_calls
+        int candidate_search_calls
+        int visited_resizes
+        bool uses_reusable_search_heaps
+        int search_heap_resizes
+        bool uses_bounded_adjacency
+        bool uses_heuristic_neighbors
+        bool uses_heuristic_reverse_pruning
+        int adjacency_layers_allocated
+        int max_observed_degree
+
     cdef cppclass CppBuildGraphResult "vectordb::BuildGraphResult":
         int entry_point
         int max_layer
         vector[int] levels
         vector[CppLayerConnection] connections
         vector[CppCsrLayer] layers
+        CppBuildStats build_stats
 
     vector[CppSearchResult] cpp_search_layer "vectordb::search_layer"(
         const float* query,
@@ -82,6 +109,17 @@ cdef extern from "hnsw_cpp_core.hpp" namespace "vectordb":
         int node_id,
         const int* connection_ids,
         int n_connection_ids,
+        int max_connections,
+        const string& metric
+    ) except +
+
+    vector[int] cpp_select_heuristic_neighbors "vectordb::select_heuristic_neighbors"(
+        const float* vectors,
+        int n_vectors,
+        int dimension,
+        int node_id,
+        const int* candidate_ids,
+        int n_candidate_ids,
         int max_connections,
         const string& metric
     ) except +
@@ -264,6 +302,43 @@ def prune_connections(
     return results
 
 
+def select_heuristic_neighbors(
+    vectors,
+    int node_id,
+    candidate_ids,
+    int max_connections,
+    str metric,
+):
+    """
+    Select neighbors with the native HNSW diversity heuristic.
+    """
+    cdef cnp.ndarray[cnp.float32_t, ndim=2, mode="c"] vectors_arr = np.ascontiguousarray(
+        vectors, dtype=np.float32
+    )
+    cdef cnp.ndarray[cnp.int32_t, ndim=1, mode="c"] candidate_arr = np.ascontiguousarray(
+        candidate_ids, dtype=np.int32
+    )
+    cdef string metric_cpp = metric.encode("utf-8")
+
+    cdef vector[int] raw = cpp_select_heuristic_neighbors(
+        <const float*> vectors_arr.data,
+        <int> vectors_arr.shape[0],
+        <int> vectors_arr.shape[1],
+        node_id,
+        <const int*> candidate_arr.data,
+        <int> candidate_arr.shape[0],
+        max_connections,
+        metric_cpp,
+    )
+
+    cdef Py_ssize_t i
+    cdef list results = []
+    for i in range(raw.size()):
+        results.append(raw[i])
+
+    return results
+
+
 def build_graph(
     vectors,
     levels,
@@ -337,4 +412,30 @@ def build_graph(
         "levels": output_levels,
         "connections": output_connections,
         "layers": output_layers,
+        "build_stats": {
+            "vectors": raw.build_stats.vectors,
+            "dimensions": raw.build_stats.dimensions,
+            "max_layer": raw.build_stats.max_layer,
+            "directed_edges": raw.build_stats.directed_edges,
+            "total_seconds": raw.build_stats.total_seconds,
+            "construction_seconds": raw.build_stats.construction_seconds,
+            "search_seconds": raw.build_stats.search_seconds,
+            "greedy_search_seconds": raw.build_stats.greedy_search_seconds,
+            "candidate_search_seconds": raw.build_stats.candidate_search_seconds,
+            "prune_seconds": raw.build_stats.prune_seconds,
+            "csr_export_seconds": raw.build_stats.csr_export_seconds,
+            "uses_squared_l2": True if raw.build_stats.uses_squared_l2 else False,
+            "uses_float_l2_accumulation": True if raw.build_stats.uses_float_l2_accumulation else False,
+            "search_calls": raw.build_stats.search_calls,
+            "greedy_search_calls": raw.build_stats.greedy_search_calls,
+            "candidate_search_calls": raw.build_stats.candidate_search_calls,
+            "visited_resizes": raw.build_stats.visited_resizes,
+            "uses_reusable_search_heaps": True if raw.build_stats.uses_reusable_search_heaps else False,
+            "search_heap_resizes": raw.build_stats.search_heap_resizes,
+            "uses_bounded_adjacency": True if raw.build_stats.uses_bounded_adjacency else False,
+            "uses_heuristic_neighbors": True if raw.build_stats.uses_heuristic_neighbors else False,
+            "uses_heuristic_reverse_pruning": True if raw.build_stats.uses_heuristic_reverse_pruning else False,
+            "adjacency_layers_allocated": raw.build_stats.adjacency_layers_allocated,
+            "max_observed_degree": raw.build_stats.max_observed_degree,
+        },
     }

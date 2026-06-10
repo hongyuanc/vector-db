@@ -1293,12 +1293,329 @@ The first success target is SIFT1M 100k at `M=16`, `ef_construction=200`,
 least 99.30%, and raise batch QPS to at least 6,000 while preserving compact CSR
 storage.
 
+## Native Build Instrumentation
+
+What was there before: benchmark reports measured Python-level `index.build()`
+wall time, but the native builder itself did not report where construction time
+was spent. Once batch build moved into C++, that made the next optimization
+steps harder to prioritize. A 49.79s build could be dominated by graph search,
+neighbor pruning, adjacency mutation, CSR export, or wrapper conversion, but the
+benchmark schema could not distinguish those phases.
+
+What was implemented: the C++ `BuildGraphResult` now carries a `BuildStats`
+record with native build phase timings and graph shape counters. The Cython
+wrapper converts that struct into a Python `build_stats` dictionary, and
+`HNSWIndex` stores it on `_last_cpp_build_stats` after a C++ batch build. The
+benchmark CLI now includes `metrics.cpp_build_stats` in JSON output and renders
+the main native phase timings in the Markdown report. The comparison helper can
+also compare native phase timings between benchmark artifacts.
+
+Why this matters: this is instrumentation, not an optimization. Its job is to
+make later optimization chunks measurable. Before changing distance math,
+visited tracking, adjacency layout, or neighbor selection, the project can now
+record whether a change reduced native search time, pruning time, CSR export
+time, or only shifted work between phases.
+
+Verification added:
+
+- `tests/test_hnsw_cpp.py` checks that `hnsw_cpp.build_graph()` returns native
+  phase stats and that `HNSWIndex.build()` stores them.
+- `tests/test_benchmark_cli.py` checks that benchmark JSON and Markdown reports
+  expose the C++ build stats.
+
+## Squared L2 Native Ordering
+
+What was there before: the C++ path computed full Euclidean distance with
+`sqrt` during graph traversal, neighbor pruning, and search ordering. This was
+simple and matched the public distance value directly, but the square root is
+not needed for ordering because squared L2 distance preserves the same nearest
+neighbor order as L2 distance.
+
+What was implemented: native Euclidean heap comparisons and pruning now use
+squared L2 distance internally. Public search results still return normal L2
+distance by converting the selected result distances back with `sqrt` at the
+result boundary. Cosine behavior is unchanged. Build stats now include
+`uses_squared_l2`, so benchmark artifacts can show when this path is active.
+
+Why this matters: HNSW build and search perform many distance calculations. This
+change removes an avoidable square root from internal candidate ordering without
+changing graph semantics or public result distances. It is a small optimization,
+but it also creates a clean boundary for later distance-kernel work: internal
+ordering can use the cheapest monotonic distance form, while the public API can
+still expose user-facing distances.
+
+Verification added:
+
+- `tests/test_hnsw_cpp.py` checks that Euclidean native builds report
+  `uses_squared_l2=True`, while cosine builds report `False`.
+- Existing C++ search tests continue to check public Euclidean distances, so the
+  result boundary still returns normal L2 values.
+- `tests/test_benchmark_cli.py` checks that benchmark JSON includes the new
+  build-stat field.
+
+## Reusable Native Visited Scratch
+
+What was there before: every native layer search allocated a fresh visited array.
+That happened during batch graph construction and during compact CSR search.
+HNSW performs many small layer searches, especially while building, so repeated
+visited allocation and clearing added allocator and memory-write overhead to a
+hot path.
+
+What was implemented: the C++ core now has a `SearchScratch` helper with a
+generation-mark visited array. Instead of clearing memory for each search, the
+scratch object increments a generation counter and marks visited node IDs with
+that generation. The builder preallocates scratch storage once for the full
+vector count, and `search_batch()` reuses one scratch object across all layer
+searches in the batch. The public single-layer `search_layer()` keeps the same
+API and creates local scratch internally.
+
+Why this matters: this removes repeated visited-array allocation without
+changing search semantics. The win should show up most clearly in native build
+search time, because construction performs one or more graph searches for almost
+every inserted vector. Benchmark stats now include `search_calls` and
+`visited_resizes`, making the reuse visible in artifacts. For a normal batch
+build, `visited_resizes` should stay near one while `search_calls` grows with the
+number of inserted vectors and layers searched.
+
+Verification added:
+
+- `tests/test_hnsw_cpp.py` checks that a deterministic build performs multiple
+  native search calls while resizing visited scratch only once.
+- Existing C++ Euclidean, cosine, and batch-search parity tests continue to
+  verify that result ordering and public distances are unchanged.
+- `tests/test_benchmark_cli.py` checks that JSON and Markdown benchmark reports
+  expose the scratch counters.
+
+## Bounded Native Adjacency
+
+What was there before: the native builder represented mutable graph edges as
+nested `std::vector<std::vector<int>>` containers. Each layer's connection list
+grew like an ordinary vector, even though HNSW has a known degree limit:
+`2M` connections at layer 0 and `M` connections on upper layers. The code still
+enforced degree limits through pruning, but the mutable adjacency shape did not
+make those limits explicit.
+
+What was implemented: each native build layer now uses a `BuildLayer` wrapper
+with an explicit `max_connections` value and a pre-reserved neighbor vector. The
+builder allocates layer storage through one `ensure_layer()` helper that assigns
+the expected limit, reserves space for the bounded degree plus one overflow
+entry, and tracks how many adjacency layer blocks were allocated. CSR export is
+unchanged, so the public compact graph shape remains the same.
+
+Why this matters: this is a layout cleanup that prepares the builder for deeper
+native optimization. It reduces accidental vector growth in a bounded-degree
+data structure and makes the degree contract easier to inspect. It also gives
+future chunks a clearer place to replace the remaining vector-backed neighbor
+storage with fixed-capacity or small-vector storage if measurements justify it.
+
+An implementation detail surfaced during testing: the current construction
+semantics can allocate a connection block above a node's sampled level when a
+higher-layer insertion connects through that node. This behavior existed before
+the bounded wrapper. The new tests preserve that behavior but verify the
+important invariants: all emitted connection lists stay within the HNSW degree
+limits, and allocated adjacency layers stay bounded by the possible node/layer
+matrix.
+
+Verification added:
+
+- `tests/test_hnsw_cpp.py` checks that native build stats report bounded
+  adjacency, adjacency layer allocation count, and maximum observed degree.
+- Existing searchable-graph and batch-search parity tests continue to verify
+  that CSR output and search results remain compatible.
+- `tests/test_benchmark_cli.py` checks that benchmark JSON includes the bounded
+  adjacency counters.
+
+## Heuristic Native Neighbor Selection
+
+What was there before: native graph construction collected candidate neighbors
+with the HNSW layer search, sorted those candidates by distance to the inserted
+vector, and kept the nearest `M` or `2M` ids. Overflow pruning used the same
+nearest-only rule. This was simple and fast, but it could keep several neighbors
+that sit in the same local direction and discard a slightly farther neighbor
+that improves graph navigability.
+
+What was implemented: the native selector now applies the standard HNSW
+diversity heuristic when building each layer's neighbor set and when pruning a
+neighbor list after adding a reverse edge. Candidates are still processed in
+distance order, but a candidate is skipped when an already selected neighbor is
+closer to that candidate than the inserted vector is. If the heuristic produces
+fewer than the requested degree, the selector fills the remaining slots with the
+closest non-selected candidates so the graph keeps useful degree density. Greedy
+entry-point descent still uses nearest-only selection because that phase is
+supposed to choose one closest waypoint, not a diversified neighbor set.
+
+Why this matters: HNSW recall depends on graph navigability, not just local
+nearest-neighbor degree. The heuristic tends to keep neighbors that point into
+different regions of the vector space, which improves the chance that search can
+escape a narrow local cluster. This is an accuracy-oriented C++ change: it may
+add a small amount of distance work during construction and pruning, but it
+targets recall quality and brings the native builder closer to production HNSW
+implementations.
+
+Verification added:
+
+- `tests/test_hnsw_cpp.py` exposes the native selector through Cython and checks
+  a geometry where nearest-only would keep a redundant candidate while the
+  heuristic keeps a more diverse neighbor.
+- Native build stats now report `uses_heuristic_neighbors` so benchmark reports
+  make the active construction policy visible.
+- Existing pruning, graph construction, batch-search, and benchmark contract
+  tests continue to verify that the native graph remains bounded and searchable.
+
+## Fast Reverse-Edge Pruning
+
+What was there before: after adding heuristic native neighbor selection, the
+builder applied the heuristic both when selecting the new node's outward
+neighbors and when pruning an existing neighbor's reverse-edge list after an
+overflow. The 100k SIFT1M run showed that this doubled build time: build time
+rose to `107.75s`, with native prune time alone taking `40.89s`.
+
+What was implemented: outward neighbor selection still uses the HNSW diversity
+heuristic, preserving the recall-oriented edge choice for the newly inserted
+node. Reverse-edge overflow pruning now uses the fast nearest-only selector.
+The public `prune_connections()` wrapper still exposes heuristic pruning for
+direct use, but the batch builder avoids the expensive heuristic loop on the
+high-frequency reverse-prune path. Build stats now report
+`uses_heuristic_reverse_pruning=false` so benchmark artifacts make this policy
+visible.
+
+Why this matters: reverse-edge pruning is called frequently during construction,
+and each heuristic prune can compare candidate vectors against already selected
+vectors. On `M=16`, that turns many small overflow repairs into repeated
+candidate-to-selected distance scans. The policy split keeps the main accuracy
+benefit from diversified outward links while reducing the build-time regression
+from more than `2x` to about `1.36x` against the prior 100k benchmark.
+
+Verification added:
+
+- `tests/test_hnsw_cpp.py` checks that native build stats expose the reverse
+  pruning policy.
+- `tests/test_benchmark_cli.py` checks that benchmark JSON includes
+  `uses_heuristic_reverse_pruning`.
+- A 100k SIFT1M instrumented run after the change reported build time `66.17s`,
+  recall@10 `0.9860`, native search time `51.80s`, and native prune time
+  `7.36s`.
+- A 100k SIFT1M ChromaDB comparison after the change reported our build time
+  `66.19s`, recall@10 `98.40%`, and QPS `3779.7`, compared with ChromaDB build
+  time `5.30s`, recall@10 `99.90%`, and QPS `5778.7`.
+
+## Split Native Build-Search Profiling
+
+What was there before: after fast reverse-edge pruning, the 100k SIFT1M run
+showed native build search as the dominant phase, but the benchmark could not
+separate upper-layer greedy descent from candidate collection on insertion
+layers. That made the next optimization target ambiguous.
+
+What was implemented: native build stats now split `search_seconds` and
+`search_calls` into `greedy_search_seconds`, `candidate_search_seconds`,
+`greedy_search_calls`, and `candidate_search_calls`. The aggregate
+`search_seconds` and `search_calls` remain available for compatibility, and the
+tests verify that the aggregate equals the split phases.
+
+Why this matters: HNSW build uses search in two different ways. Upper-layer
+descent chooses a single waypoint, while insertion-layer search collects an
+`ef_construction` candidate set. They have different cost profiles and should
+not be optimized blindly as one bucket. The 10k SIFT1M profiling run after this
+change reported `126,005` greedy calls taking `0.124s`, while `20,155`
+candidate-search calls took `1.668s`. That points the next work at candidate
+collection and distance evaluation, not greedy descent.
+
+Verification added:
+
+- `tests/test_hnsw_cpp.py` checks the split search timing and call counters.
+- `tests/test_benchmark_cli.py` checks that benchmark JSON exposes the split
+  fields.
+- `benchmarks/compare_results.py` can compare greedy and candidate search time
+  between benchmark reports.
+- A 10k SIFT1M benchmark reported build time `2.99s`, recall@10 `0.9980`, and
+  the split described above.
+
+## Float Native L2 Accumulation
+
+What was there before: the native Euclidean squared-L2 kernel read float32
+vectors but widened every component difference and accumulator to `double`.
+That preserved extra precision, but SIFT vectors are float32 and HNSW internal
+ordering does not need double precision for distance accumulation. The split
+profiling showed insertion-layer candidate search dominated build-search time,
+and every candidate expansion pays for distance evaluation.
+
+What was implemented: the native squared-L2 kernel now accumulates in `float`
+with four independent partial sums, then converts the final squared distance
+back to `double` for the existing heap and result structures. Cosine remains on
+its existing dot/norm path. Build stats now report
+`uses_float_l2_accumulation` for Euclidean builds so benchmark artifacts make the
+active distance kernel visible.
+
+Why this matters: this moves the hot Euclidean path closer to production vector
+index implementations that operate on float32 vectors with float32 distance
+kernels. On 100k SIFT1M, this reduced native search time from `51.80s` to
+`41.48s` and native prune time from `7.36s` to `4.19s`, while keeping recall@10
+at `0.9860` in the standalone benchmark.
+
+Verification added:
+
+- `tests/test_hnsw_cpp.py` checks that Euclidean builds report
+  `uses_float_l2_accumulation=true`, while cosine builds report `false`.
+- `tests/test_benchmark_cli.py` checks that benchmark JSON exposes the flag.
+- A 10k SIFT1M run improved build time from `2.99s` to `2.03s` with recall@10
+  unchanged at `0.9980`.
+- A 100k SIFT1M standalone run improved build time from `66.17s` to `49.95s`,
+  with recall@10 unchanged at `0.9860`.
+- A 100k SIFT1M ChromaDB comparison reported our build time `53.15s`, recall@10
+  `98.50%`, and QPS `4692.6`, compared with ChromaDB build time `4.81s`,
+  recall@10 `99.90%`, and QPS `6054.8`.
+
+## Reusable Native Search Heaps
+
+What was there before: every mutable-layer build search created fresh
+`std::priority_queue` containers for the candidate frontier and result set. At
+100k SIFT1M, the builder performed `1,742,434` mutable-layer searches, so even
+small per-call heap container allocation overhead showed up in the candidate
+search phase.
+
+What was implemented: `SearchScratch` now owns reusable candidate and result
+heap vectors for mutable-layer search. Each call clears the vectors and uses
+`std::push_heap` / `std::pop_heap` with the same min-heap and max-heap
+comparators as the old `std::priority_queue` path. The vectors keep their
+capacity between searches, so the build avoids repeated heap container
+allocation while preserving the existing HNSW search semantics. Build stats now
+report `uses_reusable_search_heaps` and `search_heap_resizes`.
+
+Why this matters: after float L2 accumulation, the remaining build bottleneck
+was still insertion-layer candidate search. Heap reuse targets that cost without
+changing graph quality or HNSW parameters. It is not the final answer to the
+ChromaDB gap, but it is a low-risk C++ memory-management improvement on a path
+called hundreds of thousands to millions of times per build.
+
+Verification added:
+
+- `tests/test_hnsw_cpp.py` checks that native builds report reusable search
+  heaps and that heap reserves are far below total search calls.
+- `tests/test_benchmark_cli.py` checks that benchmark JSON exposes the heap
+  reuse fields.
+- `benchmarks/compare_results.py` can compare `search_heap_resizes` between
+  benchmark reports.
+- A 10k SIFT1M run improved build time from `2.03s` to `1.91s`, with recall@10
+  unchanged at `0.9980`.
+- A 100k SIFT1M standalone run improved build time from `49.95s` to `44.64s`,
+  with recall@10 unchanged at `0.9860`; candidate-search time dropped from
+  `39.70s` to `35.30s`.
+- A 100k SIFT1M ChromaDB comparison reported our build time `44.92s`, recall@10
+  `98.60%`, and QPS `4768.0`, compared with ChromaDB build time `4.65s`,
+  recall@10 `99.90%`, and QPS `6372.7`.
+
 ### Next Steps
 
 - Write the implementation plan for the C++ parity phase as small, testable,
   commit-sized chunks.
-- Start with instrumentation before changing native behavior, so each
-  optimization has a measurable before/after result.
+- Use the instrumentation to compare native build phases before and after the
+  squared-L2, visited-scratch, bounded-adjacency, and heuristic-neighbor
+  changes on the same benchmark shape.
+- Add an accuracy-focused benchmark slice that reports recall deltas across
+  nearest-only versus heuristic construction on clustered data.
+- Optimize insertion-layer candidate search next. After reusable search heaps,
+  the 100k run still spends `35.30s` in candidate search, while greedy descent
+  is only `1.43s`.
 - Leave native online mutation for a separate future design after the
   batch-built read index path is closer to ChromaDB.
 
