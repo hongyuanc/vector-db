@@ -193,28 +193,49 @@ class SegmentedHNSWIndex:
         return [self.search(query, k=k, ef=ef) for query in query_array]
 
     def estimate_graph_memory(self) -> dict:
-        python_nodes = sum(len(segment.index.nodes) for segment in self.segments)
+        python_nodes = 0
+        python_graph_materialized = False
+        python_layer_count = 0
+        python_edge_count = 0
+        cpp_layer_count = 0
         cpp_edges = 0
         cpp_bytes = 0
         for segment in self.segments:
-            graph_cache = segment.index._cpp_graph_cache or {}
+            segment_index = segment.index
+            nodes = getattr(segment_index, "nodes", {}) or {}
+            python_nodes += len(nodes)
+            segment_python_layers = set()
+            for node in nodes.values():
+                connections = getattr(node, "connections", {}) or {}
+                for layer, neighbors in connections.items():
+                    segment_python_layers.add(layer)
+                    python_edge_count += len(neighbors)
+            python_layer_count += len(segment_python_layers)
+            python_graph_materialized = (
+                python_graph_materialized
+                or bool(getattr(segment_index, "_python_graph_materialized", False))
+                or python_edge_count > 0
+            )
+
+            graph_cache = getattr(segment_index, "_cpp_graph_cache", None) or {}
             for layer in graph_cache.values():
                 offsets, neighbors = layer
+                cpp_layer_count += 1
                 cpp_edges += int(len(neighbors))
                 cpp_bytes += int(offsets.nbytes + neighbors.nbytes)
-        python_bytes = python_nodes * 128
+        python_bytes = python_nodes * 128 + python_edge_count * 72
         total_bytes = python_bytes + cpp_bytes
         bytes_per_mib = 1024 * 1024
         return {
             "python_nodes": python_nodes,
-            "python_graph_materialized": False,
-            "python_layers": 0,
-            "python_edges": 0,
+            "python_graph_materialized": python_graph_materialized,
+            "python_layers": python_layer_count,
+            "python_edges": python_edge_count,
             "python_graph_mb": round(python_bytes / bytes_per_mib, 4),
-            "cpp_layers": sum(len(segment.index._cpp_graph_cache or {}) for segment in self.segments),
+            "cpp_layers": cpp_layer_count,
             "cpp_edges": cpp_edges,
             "cpp_graph_mb": round(cpp_bytes / bytes_per_mib, 4),
-            "total_edges_counted": cpp_edges,
+            "total_edges_counted": python_edge_count + cpp_edges,
             "total_graph_mb": round(total_bytes / bytes_per_mib, 4),
         }
 

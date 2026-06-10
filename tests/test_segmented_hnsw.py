@@ -232,6 +232,37 @@ def test_segmented_hnsw_reports_mixed_graph_storage_when_segments_are_not_all_co
     assert index.graph_storage_mode == "segmented_mixed"
 
 
+class FakePythonGraphSegment(FakeExactSegment):
+    @property
+    def graph_storage_mode(self):
+        return "materialized_python"
+
+    def build(self, vectors):
+        super().build(vectors)
+        self.nodes = {
+            0: type("Node", (), {"connections": {0: {1}}})(),
+            1: type("Node", (), {"connections": {0: {0}}})(),
+        }
+        self._python_graph_materialized = True
+        self._cpp_graph_cache = None
+
+
+def test_segmented_hnsw_memory_estimate_counts_python_materialized_segments():
+    from src.index.segmented_hnsw import SegmentedHNSWIndex
+
+    vectors = np.arange(8, dtype=np.float32).reshape(4, 2)
+    index = SegmentedHNSWIndex(segment_count=2, segment_factory=FakePythonGraphSegment)
+    index.build(vectors)
+
+    memory = index.estimate_graph_memory()
+
+    assert memory["python_graph_materialized"] is True
+    assert memory["python_layers"] == 2
+    assert memory["python_edges"] == 4
+    assert memory["cpp_edges"] == 0
+    assert memory["total_edges_counted"] == 4
+
+
 def test_segmented_hnsw_rejects_invalid_segment_settings():
     from src.index.segmented_hnsw import SegmentedHNSWIndex
 
