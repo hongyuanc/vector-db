@@ -83,12 +83,16 @@ logs/
 *.mmap
 
 # Benchmarks and results
-benchmarks/results/
 benchmarks/datasets/
 *.csv
 *.json
 !pyproject.toml
 !package.json
+
+# Curated benchmark artifacts are part of the learning record.
+!benchmarks/results/
+!benchmarks/results/*.json
+!benchmarks/results/*.md
 
 # OS files
 .DS_Store

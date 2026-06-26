@@ -1,0 +1,103 @@
+{
+  "schema_version": "benchmark.v1",
+  "environment": {
+    "created_at": "2026-06-06T15:22:21.781466+00:00",
+    "git_commit": "b6e0ebd",
+    "git_dirty": true,
+    "python": "3.11.14",
+    "platform": "macOS-26.5-arm64-arm-64bit",
+    "numpy": "2.3.5",
+    "cython_available": true,
+    "cpp_available": true
+  },
+  "dataset": {
+    "name": "sift1m",
+    "size": 10000,
+    "dimension": 128,
+    "n_queries": 100,
+    "seed": 42
+  },
+  "config": {
+    "hnsw": {
+      "M": 16,
+      "ef_construction": 200,
+      "ef_search": 50,
+      "metric": "euclidean"
+    },
+    "k": 10,
+    "warmup_queries": 10,
+    "distribution": null,
+    "subset": "small"
+  },
+  "metrics": {
+    "build_time_seconds": 2.417062,
+    "vectors_per_second": 4137.25,
+    "search_time_seconds": 0.009172,
+    "qps": 10902.5,
+    "latency_ms": {
+      "p50": 0.0918,
+      "p95": 0.1187,
+      "p99": 0.1293,
+      "average": 0.0911
+    },
+    "recall_at_k": 0.991,
+    "memory": {
+      "vector_data_mb": 4.88,
+      "query_data_mb": 0.05,
+      "graph": {
+        "python_nodes": 10000,
+        "python_graph_materialized": false,
+        "python_layers": 0,
+        "python_edges": 0,
+        "python_graph_mb": 1.4257,
+        "cpp_layers": 17,
+        "cpp_edges": 482450,
+        "cpp_graph_mb": 2.489,
+        "total_edges_counted": 482450,
+        "total_graph_mb": 3.9147
+      },
+      "process_peak_rss_mb": 4608.78,
+      "process_peak_rss_delta_mb": 0.0
+    },
+    "persistence": {
+      "compact": {
+        "available": true,
+        "save_time_seconds": 0.0093,
+        "load_time_seconds": 0.006571,
+        "file_size_mb": 7.6885,
+        "process_peak_rss_mb": 4608.78,
+        "loaded_graph": {
+          "python_nodes": 10000,
+          "python_graph_materialized": false,
+          "python_layers": 0,
+          "python_edges": 0,
+          "python_graph_mb": 1.4257,
+          "cpp_layers": 17,
+          "cpp_edges": 482450,
+          "cpp_graph_mb": 2.489,
+          "total_edges_counted": 482450,
+          "total_graph_mb": 3.9147
+        }
+      },
+      "materialized": {
+        "available": true,
+        "save_time_seconds": 0.042441,
+        "load_time_seconds": 0.18533,
+        "file_size_mb": 6.674,
+        "process_peak_rss_mb": 4608.78,
+        "loaded_graph": {
+          "python_nodes": 10000,
+          "python_graph_materialized": true,
+          "python_layers": 17,
+          "python_edges": 482450,
+          "python_graph_mb": 44.5242,
+          "cpp_layers": 17,
+          "cpp_edges": 482450,
+          "cpp_graph_mb": 2.489,
+          "total_edges_counted": 964900,
+          "total_graph_mb": 47.0131
+        }
+      }
+    }
+  }
+}

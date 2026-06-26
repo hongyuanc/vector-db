@@ -46,7 +46,7 @@ class Collection:
             M: HNSW M parameter (max connections per node)
             ef_construction: HNSW ef_construction parameter
             ef_search: HNSW ef_search parameter (default for searches)
-            metric: Distance metric ("euclidean", "cosine", "dot_product")
+            metric: HNSW distance metric ("euclidean" or "cosine")
         """
         self.name = name
         self.dimension = dimension

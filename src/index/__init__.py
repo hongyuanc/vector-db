@@ -1,5 +1,15 @@
 """
-Index implementations for vector search (brute-force, HNSW).
+Index implementations for vector search.
 """
 
-from src.index.segmented_hnsw import SegmentedHNSWIndex
+from .base import VectorIndex
+from .brute_force import BruteForceIndex
+from .hnsw import HNSWIndex
+from .segmented_hnsw import SegmentedHNSWIndex
+
+__all__ = [
+    "VectorIndex",
+    "BruteForceIndex",
+    "HNSWIndex",
+    "SegmentedHNSWIndex",
+]
