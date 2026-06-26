@@ -36,10 +36,10 @@ setup(
     name="vector-db",
     version="0.1.0",
     author="Hong",
-    description="A production-grade vector database with HNSW indexing",
+    description="Educational vector database with HNSW indexing built from scratch",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/vector-db",
+    url="https://github.com/hongyuanc/vector-db",
     packages=find_packages(),
     ext_modules=cythonize(
         extensions,

@@ -1,5 +1,7 @@
 .PHONY: help install install-dev test test-cov lint format type-check clean run docker-build docker-run benchmark
 
+PYTHON ?= python
+
 help:
 	@echo "Available commands:"
 	@echo "  make install       - Install production dependencies"
@@ -24,17 +26,17 @@ install-dev:
 	pre-commit install
 
 test:
-	pytest tests/ -v
+	$(PYTHON) -m pytest tests/test_*.py -q -m "not slow and not benchmark"
 
 test-cov:
-	pytest tests/ -v --cov=src --cov-report=term-missing --cov-report=html
+	$(PYTHON) -m pytest tests/test_*.py -q -m "not slow and not benchmark" --cov=src --cov-report=term-missing --cov-report=html
 
 lint:
 	ruff check src/ tests/
 
 format:
-	black src/ tests/ benchmarks/ scripts/
-	ruff check --fix src/ tests/
+	black src/ tests/ benchmarks/
+	ruff check --fix src/ tests/ benchmarks/
 
 type-check:
 	mypy src/
@@ -55,7 +57,7 @@ run:
 	uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
 
 docker-build:
-	docker build -t vector-db:latest -f docker/Dockerfile .
+	docker build -t vector-db:latest -f Dockerfile .
 
 docker-run:
 	docker-compose up -d
@@ -64,7 +66,7 @@ docker-stop:
 	docker-compose down
 
 benchmark:
-	python benchmarks/benchmark.py
+	$(PYTHON) benchmarks/benchmark.py
 
 pre-commit:
 	pre-commit run --all-files

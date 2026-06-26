@@ -23,7 +23,7 @@ from ..collection import Collection
 # Initialize FastAPI app
 app = FastAPI(
     title="Vector DB API",
-    description="Production-grade vector database with HNSW indexing",
+    description="Educational vector database with HNSW indexing",
     version="0.1.0",
 )
 

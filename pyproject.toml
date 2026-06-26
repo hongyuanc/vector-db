@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vector-db"
 version = "0.1.0"
-description = "A production-grade vector database with HNSW indexing"
+description = "Educational vector database with HNSW indexing built from scratch"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -130,6 +130,7 @@ markers = [
     "very_slow: marks tests as very slow long-running benchmarks",
     "integration: marks tests as integration tests",
     "benchmark: marks tests as benchmarks",
+    "real_data: marks tests that require downloaded benchmark datasets",
 ]
 
 [tool.coverage.run]
