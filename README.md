@@ -1,166 +1,202 @@
 # Vector Database
 
-A production-grade vector database built from scratch with HNSW indexing for fast similarity search. Supports millions of high-dimensional vectors with sub-millisecond query latency.
+An educational vector database built from scratch to understand how approximate
+nearest-neighbor systems work under the hood. The project implements HNSW
+indexing, vector storage, metadata filtering, persistence, a FastAPI service
+layer, Cython helpers, and a native C++/CSR HNSW path.
 
-## Why This Project?
+This repository is intentionally learning-focused. It is not a wrapper around
+FAISS or hnswlib; the core data structures and benchmark tooling are implemented
+directly so the performance trade-offs are visible.
 
-This project was built as an educational deep-dive into how modern vector databases like Pinecone, ChromaDB, and Weaviate work under the hood. Rather than using existing libraries (FAISS, Annoy), every component was implemented from scratch to understand the fundamental algorithms, data structures, and optimization techniques that power semantic search at scale.
+## Current Status
 
-## The Journey
+The current implementation includes:
 
-The implementation evolved through multiple optimization phases:
+- HNSW approximate nearest-neighbor search
+- compact CSR graph storage for native search
+- C++ batch build and batch search paths wrapped through Cython
+- optional segmented HNSW builds for parallel native construction
+- memory-mapped vector storage
+- SQLite-backed metadata storage and soft deletes
+- FastAPI endpoints for collection creation, insert, search, and index build
+- benchmark tooling that records JSON and Markdown artifacts
 
-**Phase 1: Pure Python** - Initial implementation using Python and NumPy. Simple and clear but slow, achieving only ~600 QPS on 10k vectors due to Python's interpreter overhead in the core search loops.
+The strongest current path is the C++/CSR HNSW implementation. Segmented build
+is available as an opt-in benchmarking mode because it improves build time but
+changes query throughput trade-offs.
 
-**Phase 2: Cython Optimization** - Rewrote performance-critical code (distance calculations, search loops) in Cython, compiling to C while maintaining Python's development ergonomics. This brought a 3x speedup (build: 17.6s → 5.8s, search: 600 → 1,810 QPS), demonstrating that 70-80% of C++ performance is achievable without a full rewrite.
+## Architecture
 
-**Phase 3: Competitive Benchmarking** - Benchmarked against production systems (ChromaDB, Qdrant) on SIFT1M to validate the approach and understand the remaining performance gap. ChromaDB's pure C++ with SIMD instructions is 4-5x faster, but the gap narrows at scale, showing good algorithmic scaling properties.
+```text
+FastAPI service
+    |
+Collection
+    |
+    +-- VectorStore: memory-mapped float32 vector data
+    +-- MetadataStore: SQLite metadata and tombstones
+    +-- HNSWIndex: Python API with Cython/C++ acceleration
+            |
+            +-- compact CSR graph cache for native search
+            +-- optional SegmentedHNSWIndex wrapper
+```
 
-## Features
+Python owns the public API, collection orchestration, storage, metadata, and
+persistence compatibility. Cython and C++ own the hot HNSW build/search paths
+where the Python object model would otherwise dominate runtime.
 
-- **HNSW Algorithm**: Hierarchical Navigable Small World graphs for approximate nearest neighbor search
-- **High Performance**: Sub-10ms p99 latency, 500+ QPS on single machine
-- **Multiple Metrics**: Cosine similarity, Euclidean distance, dot product
-- **Metadata Filtering**: Hybrid search with SQLite-backed metadata storage
-- **REST API**: FastAPI server with OpenAPI documentation
-- **Docker Ready**: Production deployment with docker-compose
+## Performance Snapshot
 
-## Performance
+Benchmark numbers are hardware- and configuration-dependent. The tracked
+artifacts in `benchmarks/results/` are the source of truth for the current
+headline numbers.
 
-Benchmarked on SIFT1M (industry-standard dataset):
+### Current 100k C++/CSR Comparison
+
+Tracked artifact:
+`benchmarks/results/sift1m-100k-chromadb-comparison.md`
+
+Dataset and configuration:
+
+- Dataset: SIFT1M 100k subset
+- Queries: 100
+- Metric: Euclidean
+- HNSW: `M=16`, `ef_construction=200`, `ef_search=100`
+
+| System | Build Time | Batch QPS | Batch Avg Latency | Single p99 | Recall@10 |
+|---|---:|---:|---:|---:|---:|
+| This DB, C++/CSR | 44.9216s | 4,768.04 | 0.2097ms | 1.2123ms | 0.9860 |
+| ChromaDB | 4.6508s | 6,372.68 | 0.1569ms | 0.5693ms | 0.9990 |
+
+Takeaway: the native path made search much closer to production libraries, but
+build time remains the largest gap.
+
+### Segmented Build Trade-off
+
+Tracked artifacts:
+`benchmarks/results/hnsw-segmented-sift100k-{2,4,8}.md`
+
+| Mode | Build Time | Recall@10 | QPS | p99 Latency |
+|---|---:|---:|---:|---:|
+| Single graph baseline | 40.1198s | 0.9860 | 3,378.48 | not recorded in table |
+| 2 segments / 2 threads | 18.1246s | 0.9940 | 1,900.17 | 0.7728ms |
+| 4 segments / 4 threads | 8.1387s | 0.9980 | 1,035.96 | 1.4544ms |
+| 8 segments / 8 threads | 4.6599s | 0.9940 | 570.12 | 2.4883ms |
+
+Takeaway: segmented build gives a large wall-clock build-time win, but every
+query searches more independent graphs before merging results. It should remain
+opt-in until the query-throughput trade-off is tuned.
+
+### Historical 1M Result
+
+The earlier Python/Cython-era 1M SIFT1M run is retained as historical scale
+evidence, not as the current C++/CSR headline result:
 
 | Vectors | Recall@10 | QPS | Avg Latency | Build Time |
-|---------|-----------|-----|-------------|------------|
-| 10k | 99.5% | 1,810 | 0.55ms | 13.2s |
-| 100k | 98.1% | 888 | 1.13ms | 4.5min |
+|---|---:|---:|---:|---:|
 | 1M | 93.7% | 675 | 1.48ms | 66.2min |
 
-**Test Environment:** Apple M4 Pro, 24GB RAM, Python 3.11 with Cython
-**Configuration:** M=16, ef_construction=200, ef_search=100
-
-**Scalability Insights:**
-- Query latency scales logarithmically: 10k→1M (100x vectors) adds only 0.93ms
-- QPS decreases sub-linearly: 100x more vectors = only 2.7x slower
-- Build time is O(n log n): scales from 13s to 66min for 100x data
-
-### Competitive Comparison - Production Vector Databases
-
-Head-to-head comparison on SIFT1M (10k subset, identical parameters):
-
-| System | Recall@10 | QPS | Latency | Build Time | Implementation |
-|--------|-----------|-----|---------|------------|----------------|
-| **ChromaDB** | **100.0%** | **9,234** | **0.11ms** | **0.34s** | C++ hnswlib + SIMD |
-| **This DB** | 99.5% | 1,810 | 0.55ms | 13.20s | Python + Cython |
-| Qdrant | 100.0% | 621 | 1.61ms | 0.79s | Rust |
-
-**Test Environment:** Apple M4 Pro, 24GB RAM, Python 3.11, in-memory mode
-**Parameters:** M=16, ef_construction=200, ef_search=100
-
-**Key Insights:**
-- ChromaDB leads with C++/SIMD optimization (5x faster search, 39x faster build)
-- Our implementation shows 2.9x higher QPS than Qdrant in Python client mode
-- All systems achieve strong recall (99.5%+) with identical HNSW parameters
-- Build time gap highlights Python overhead in graph construction
-
-**Why the Performance Gap?**
-- **ChromaDB** uses hnswlib (pure C++ with SIMD/AVX instructions)
-- **This implementation** uses Cython for hot loops but core algorithm remains Python
-- **Qdrant** in `:memory:` mode with Python client has serialization overhead; production Qdrant server would likely perform differently
-
-### Scaling to 1M Vectors
-
-Full SIFT1M dataset (1M vectors) comparison:
-
-| System | Recall@10 | QPS | Latency | Build Time | Implementation |
-|--------|-----------|-----|---------|------------|----------------|
-| **ChromaDB** | **98.8%** | **2,902** | **0.34ms** | **1.1 min** | C++ hnswlib + SIMD |
-| **This DB** | 93.7% | 675 | 1.48ms | 66.2 min | Python + Cython |
-
-**Key Insights:**
-- ChromaDB maintains 4.3x faster search at scale (2902 vs 675 QPS)
-- Build time gap widens to 60x (1.1 min vs 66.2 min) due to O(n log n) complexity
-- Both systems maintain strong recall (93.7%+ at 1M scale)
-- Our HNSW scales reasonably: 10k→1M (100x data) only reduces QPS by 2.7x
-
-Note: Qdrant's Python `:memory:` client degrades significantly beyond 20k vectors and is not viable for 1M scale benchmarking.
-
-See [Benchmark Methodology](#running-benchmarks) for reproduction steps.
+A clean current 1M C++/CSR benchmark should be rerun before using 1M numbers as
+headline performance claims.
 
 ## Quick Start
 
-### Using Docker (Recommended)
+### Local Setup
 
 ```bash
-# Start the server
-docker-compose up -d
-
-# Access interactive API docs
-open http://localhost:8000/docs
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python setup.py build_ext --inplace
 ```
 
-### Local Installation
+### Run The API
 
 ```bash
-# Clone and setup
-git clone <repo-url>
-cd vector-db
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-
-# Build Cython/C++ extensions
-python setup.py build_ext --inplace
-
-# Start server
 python -m uvicorn src.api.server:app --host 0.0.0.0 --port 8000
+```
+
+Interactive API docs will be available at:
+
+```text
+http://localhost:8000/docs
+```
+
+### Docker
+
+```bash
+docker-compose up -d
 ```
 
 ## Basic Usage
 
-### 1. Create a Collection
+Create a collection:
 
 ```bash
-curl -X POST "http://localhost:8000/collections/create?dimension=384&name=default"
+curl -X POST "http://localhost:8000/collections/create?dimension=3&name=default"
 ```
 
-### 2. Insert Vectors
+Insert a vector:
 
 ```bash
 curl -X POST "http://localhost:8000/insert" \
   -H "Content-Type: application/json" \
   -d '{
-    "vector": [0.1, 0.2, ...],
+    "vector": [0.1, 0.2, 0.3],
     "metadata": {"title": "Document 1", "category": "tech"}
   }'
 ```
 
-### 3. Build Index
+Build the HNSW index:
 
 ```bash
 curl -X POST "http://localhost:8000/collections/default/build_index"
 ```
 
-### 4. Search
+Search:
 
 ```bash
 curl -X POST "http://localhost:8000/search" \
   -H "Content-Type: application/json" \
   -d '{
-    "vector": [0.1, 0.2, ...],
+    "vector": [0.1, 0.2, 0.3],
     "k": 10,
     "filter": {"category": "tech"}
   }'
 ```
 
-## Running Benchmarks
+## Development
 
-### Reproducible Metrics Report
-
-Use the top-level benchmark runner when you want a clean JSON/Markdown artifact
-for comparing changes across commits:
+Run the main test suite:
 
 ```bash
-# Synthetic benchmark, no downloads required
+make test
+```
+
+Run focused non-benchmark tests:
+
+```bash
+python -m pytest tests/test_*.py -q -m "not slow and not benchmark"
+```
+
+Run linting and formatting:
+
+```bash
+make lint
+make format
+```
+
+Build Cython/C++ extensions:
+
+```bash
+python setup.py build_ext --inplace
+```
+
+## Benchmarking
+
+Run a synthetic benchmark without downloading external datasets:
+
+```bash
 python benchmarks/benchmark.py \
   --dataset random \
   --size 10000 \
@@ -168,216 +204,76 @@ python benchmarks/benchmark.py \
   --queries 100 \
   --k 10 \
   --ef-search 50 \
-  --output benchmarks/results.json \
-  --markdown-output benchmarks/results.md
+  --output benchmarks/results/random-10k.json \
+  --markdown-output benchmarks/results/random-10k.md
 ```
 
-The JSON output records the dataset, HNSW configuration, git commit, dirty
-worktree state, Python/NumPy versions, Cython availability, build time, QPS,
-p50/p95/p99 latency, recall@k, and memory estimates, including Python graph and
-C++ CSR graph storage. It also records compact CSR versus materialized Python
-graph save/load timings, file sizes, loaded graph shape, and process peak RSS
-samples. The Markdown output is intended for copying benchmark snapshots into
-the technical documentation.
-
-Compare two JSON reports after an optimization:
+Compare two benchmark reports:
 
 ```bash
 python benchmarks/compare_results.py \
-  benchmarks/baseline.json \
-  benchmarks/candidate.json \
-  --output benchmarks/comparison.md
+  benchmarks/results/baseline.json \
+  benchmarks/results/candidate.json \
+  --output benchmarks/results/comparison.md
 ```
 
-The comparison marks each metric as improved, regressed, or unchanged based on
-whether higher or lower is better for that metric.
-
-### C++ Search Core
-
-The current build includes C++ HNSW helpers wrapped through Cython. Python still
-owns the public API, storage, metadata, persistence shape, and incremental
-updates, but batch `build()` can construct the graph in C++ and post-build search
-can use compact CSR adjacency arrays with C++ priority queues for layer traversal.
-
-On SIFT1M 10k with `M=16`, `ef_construction=200`, and `ef_search=50`, the C++
-search cache moved query throughput from about 2.2k QPS to about 10.4k QPS at
-the same 99.1% Recall@10. The C++ batch builder then reduced build time from
-17.50s to 2.46s, with the same recall and about 11.1k QPS.
-
-On a refreshed SIFT1M 100k ChromaDB comparison with `ef_search=100`, the current
-C++/CSR path built in 49.79s, reached 4,266.4 batch QPS at 98.50% Recall@10,
-and had 1.0822ms single-query p99 latency. ChromaDB built in 4.83s, reached
-6,476.6 batch QPS at 99.70% Recall@10, and had 0.5752ms single-query p99
-latency. Build time is still the largest production gap; search is closer but
-ChromaDB remains faster.
-
-`HNSWIndex.search_batch()` now dispatches compact CSR indexes to a native
-C++/Cython batch path. This removed the Python full-search loop per query and
-improved the 100k batch result from 3,921.1 to 4,266.4 QPS. The remaining search
-gap now lives inside C++ layer traversal and distance computation rather than
-the public Python batch call boundary.
-
-The earlier insertion-time pruning helper did not improve build time on its own.
-The useful boundary was moving construction traversal and mutable adjacency
-together. The builder now also returns the CSR search cache directly, avoiding a
-post-build walk over Python sets to recreate adjacency arrays.
-
-The batch build path now skips Python edge materialization for normal search-only
-workloads. On SIFT1M 10k, the benchmark reports zero Python graph edges, about
-1.4 MiB of Python node metadata, and about 2.5 MiB for the C++ CSR graph.
-Save/load preserve that compact CSR shape. Incremental `insert()` and `delete()`
-still materialize Python connection sets, and now emit a runtime warning so the
-memory tradeoff is explicit. `HNSWIndex.graph_storage_mode` reports whether the
-graph is currently `compact_csr` or `materialized_python`.
-
-### Basic Performance Benchmarks
-
-Reproduce the SIFT1M results:
+Run SIFT1M benchmarks only after downloading the dataset:
 
 ```bash
-# Download SIFT1M dataset (~500MB)
 python tests/benchmarks/download_datasets.py --sift
-
-# Run benchmark on 10k vectors (~30 seconds)
-pytest tests/benchmarks/test_real_world.py::TestRealWorldDatasets::test_sift1m_small -v -s
-
-# Run parameter sweep (shows speed/accuracy trade-off)
-pytest tests/benchmarks/test_real_world.py::TestRealWorldDatasets::test_sift1m_parameter_sweep -v -s
+python -m pytest tests/benchmarks/test_real_world.py::TestRealWorldDatasets::test_sift1m_small -v -s
 ```
 
-### Competitive Comparison Benchmarks
-
-Compare against production vector databases:
-
-```bash
-# Install production vector databases (optional)
-pip install chromadb qdrant-client
-
-# 10k vectors: Our HNSW vs ChromaDB vs Qdrant (~2 minutes)
-pytest tests/benchmarks/test_chromadb_comparison.py::TestProductionComparison::test_all_systems_10k -v -s
-
-# 1M vectors: Our HNSW vs ChromaDB (~90 minutes)
-pytest tests/benchmarks/test_chromadb_comparison.py::TestProductionComparison::test_all_systems_1m -v -s
-
-# Individual comparisons
-pytest tests/benchmarks/test_chromadb_comparison.py::TestChromaDBComparison::test_chromadb_vs_ours_10k -v -s
-```
-
-**Methodology:**
-- All systems use identical HNSW parameters (M=16, ef_construction=200, ef_search=100)
-- In-memory mode for fair comparison (no disk I/O overhead)
-- Same SIFT1M dataset and ground truth
-- Batch queries to remove Python loop overhead
-- Single-threaded execution for consistent comparison
-
-## Architecture
-
-```
-API Layer (FastAPI)
-    ↓
-Collection Manager
-    ↓
-┌───────────────┬──────────────────┐
-│ HNSW Index    │ Metadata Store   │
-│ (fast search) │ (SQLite filters) │
-└───────────────┴──────────────────┘
-    ↓
-Vector Storage (memory-mapped files)
-```
-
-**Key Components:**
-- **HNSW Index**: Multi-layer graph for logarithmic search time
-- **Vector Store**: Memory-mapped files for efficient I/O
-- **Metadata Store**: SQLite database for filtering
-- **Collection**: Unified interface coordinating all components
-
-## Implementation Highlights
-
-### Performance Optimizations
-
-**Cython Implementation** (current):
-- Core search loop in Cython with C++ `std::set` for visited tracking
-- Inline C distance calculations with `nogil` for no GIL overhead
-- Memory views for zero-copy array access
-- **Result**: 3x faster build, 2.4x faster search vs pure Python
-
-**Bottlenecks Identified**:
-- 73% of build time spent in graph search (unavoidable - O(n log n) algorithm)
-- Python `heapq` and `dict` still used for priority queues and graph storage
-- Query dtype conversion (float32 to float64) on each search call
-
-**Gap vs Production Systems** (ChromaDB: 48x faster):
-- ChromaDB uses hnswlib (pure C++ with SIMD/AVX instructions)
-- Our Cython optimizes hot loops but core algorithm remains Python
-- Full C++/Go/Rust rewrite needed to match production speed
-
-**Other Optimizations**:
-- Numba JIT for distance calculations (fallback when Cython unavailable)
-- Memory-mapped storage for zero-copy vector access
-- Greedy + beam search hybrid for optimal speed/accuracy
-
-### Algorithm Implementation
-- **Multi-Layer Graph**: Exponential decay layer assignment (probability = 1/2^level) creates logarithmic search complexity
-- **Heuristic Neighbor Selection**: M-nearest selection during construction maintains graph connectivity
-- **Dynamic ef_search**: Runtime tunable search quality (50=fast, 100=balanced, 200=maximum accuracy)
-
-### Data Management
-- **Hybrid Metadata Filtering**: Post-filtering approach - fetch extra candidates, filter by metadata, return top-k
-- **Soft Deletes**: Tombstone pattern in SQLite allows delete operations without expensive graph reconstruction
-- **Persistence**: Complete index serialization with pickle for zero-downtime restarts
-
-### Scalability Features
-- **Incremental Index Building**: Add vectors one-at-a-time or bulk insert, index updates incrementally
-- **Lazy Loading**: Index loaded on-demand at first search, not at server startup
-- **Memory Efficiency**: Float32 precision (4 bytes/dim) balances accuracy and memory usage
+Long-running production comparisons live under
+`tests/benchmarks/test_chromadb_comparison.py`.
 
 ## Project Structure
 
-```
+```text
 vector-db/
-├── src/
-│   ├── api/              # REST API (FastAPI)
-│   ├── collection/       # Collection management
-│   ├── index/            # HNSW + brute force implementations
-│   ├── storage/          # Vector and metadata storage
-│   └── utils/            # Distance metrics
-├── tests/                # Unit and integration tests
-│   └── benchmarks/       # SIFT1M and performance tests
-├── data/                 # Vector database files (gitignored)
-├── Dockerfile            # Container definition
-└── docker-compose.yml    # Orchestration
+|-- src/
+|   |-- api/              # FastAPI models and server
+|   |-- collection/       # Collection orchestration
+|   |-- index/            # HNSW, segmented HNSW, brute force, Cython/C++ core
+|   |-- storage/          # Vector and metadata stores
+|   `-- utils/            # Distance metrics
+|-- benchmarks/           # Reproducible benchmark runner and comparisons
+|-- benchmarks/results/   # Curated benchmark JSON/Markdown artifacts
+|-- docs/superpowers/     # Design specs and implementation plans
+|-- tests/                # Unit tests and benchmark tests
+|-- TECHNICAL.md          # Long-form technical learning document
+|-- Dockerfile
+|-- docker-compose.yml
+|-- Makefile
+`-- setup.py
 ```
 
-## Development
+## Supported HNSW Metrics
 
-```bash
-# Run tests
-pytest tests/ -v
+The HNSW index currently supports:
 
-# Format code
-black src/ tests/
+- `euclidean`
+- `cosine`
 
-# Type check
-mypy src/
-```
+The distance utility module also contains a dot-product helper, but dot product
+is not currently accepted as an HNSW index metric.
 
-## Technology Stack
+## Current Engineering Gaps
 
-- **Python 3.11**: Core implementation
-- **Cython**: C-compiled search loops (3x speedup)
-- **NumPy**: Vectorized operations
-- **Numba**: JIT fallback for distance calculations
-- **FastAPI**: Async REST API
-- **SQLite**: Metadata storage
-- **Docker**: Containerized deployment
+Build time is still the largest gap versus production libraries. The tracked
+100k comparison shows ChromaDB building much faster than this implementation.
 
-## Configuration
+Segmented build improves wall-clock build time, but query throughput drops as
+segment count increases. The next useful work is to tune per-segment overfetch,
+merge behavior, and query fanout cost before recommending segmented mode beyond
+build-heavy experiments.
 
-Key HNSW parameters (tunable via API):
+Search throughput is closer than it was before the C++/CSR path, but ChromaDB
+still leads. Native distance-kernel profiling and SIMD-friendly squared L2
+computation are the next likely optimization areas.
 
-| Parameter | Default | Effect |
-|-----------|---------|--------|
-| `M` | 16 | Connections per node (higher = better recall, more memory) |
-| `ef_construction` | 200 | Build quality (higher = better graph, slower build) |
-| `ef_search` | 50 | Search accuracy (higher = better recall, slower queries) |
-| `metric` | euclidean | Distance metric (euclidean, cosine, dot_product) |
+## Learning Notes
+
+The long-form project explanation lives in `TECHNICAL.md`. It records what was
+there before each major change, what was implemented, why it was implemented,
+and what should happen next.
