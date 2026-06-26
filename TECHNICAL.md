@@ -1812,6 +1812,79 @@ before changing segment assignment.
 
 ---
 
+## Repository Readiness Cleanup
+
+### What Was There Before
+
+The codebase had grown from a pure Python HNSW prototype into a mixed
+Python/Cython/C++ implementation with compact CSR graph storage and an opt-in
+segmented build path. The implementation had moved forward, but some repository
+surface area still described older assumptions:
+
+- the README emphasized older Python/Cython benchmark numbers before the newer
+  C++/CSR results
+- package and API descriptions called the project production-grade instead of
+  educational and production-inspired
+- developer commands referenced paths that did not exist in the current tree
+- `pytest.mark.real_data` was used without being registered
+- future benchmark artifacts under `benchmarks/results/` could be easy to miss
+  because broad ignore rules still ignored generated JSON files
+- `dot_product` appeared in some collection-facing metric descriptions even
+  though HNSW currently accepts only `euclidean` and `cosine`
+
+### What Was Implemented
+
+The cleanup made the repository easier to extend without changing the HNSW
+algorithms:
+
+- registered the `real_data` pytest marker
+- fixed Makefile commands so tests, formatting, benchmarking, and Docker builds
+  match the current repository layout
+- updated package and API descriptions to describe the project as educational
+- tracked the project-local `AGENTS.md` instructions
+- made public index exports explicit from `src.index`
+- documented the supported HNSW metric boundary in code-facing text
+- adjusted ignore rules so curated benchmark JSON and Markdown files under
+  `benchmarks/results/` can be added normally
+- rewrote the README after the cleanup so current benchmark claims have clear
+  provenance
+
+### Why This Matters
+
+This project is meant to teach vector database internals. That means the
+repository should make trade-offs visible instead of smoothing them over. The
+cleanup separates historical benchmark evidence from current implementation
+claims, makes future benchmark artifacts easier to preserve, and reduces small
+workflow surprises before adding new features.
+
+### Remaining Engineering Gaps
+
+The current C++/CSR path is much stronger than the original Python/Cython path,
+but it is not production-competitive with ChromaDB on all dimensions.
+
+Build time remains the largest gap. Segmented build can reduce wall-clock build
+time by building independent graphs in parallel, but query throughput drops as
+segment count increases because each query fans out across more graphs before
+merging global top-k results.
+
+Search throughput is closer to ChromaDB than before, but tracked 100k benchmark
+artifacts still show ChromaDB ahead. The next useful tuning work should focus
+on native distance-kernel profiling, SIMD-friendly squared L2 computation,
+per-segment overfetch and merge behavior, and reducing segmented query fanout
+cost. Same-graph parallel insertion should remain a separate design because
+HNSW construction is order-dependent.
+
+### Next Steps
+
+- Keep segmented build opt-in until query-throughput trade-offs are better
+  understood.
+- Use clean-commit benchmark runs for future headline numbers.
+- Record both JSON and Markdown benchmark artifacts for performance changes.
+- Add new technical documentation sections alongside each future feature or
+  optimization so the learning record remains current.
+
+---
+
 ## Future Improvements
 
 ### Phase 6 (Advanced Features)
