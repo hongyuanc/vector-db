@@ -74,18 +74,19 @@ build time remains the largest gap.
 ### Segmented Build Trade-off
 
 Tracked artifacts:
-`benchmarks/results/hnsw-segmented-sift100k-{2,4,8}.md`
+`benchmarks/results/native-segmented-sift100k-{2,4,8}-k{10,20}.md`
 
-| Mode | Build Time | Recall@10 | QPS | p99 Latency |
-|---|---:|---:|---:|---:|
-| Single graph baseline | 40.1198s | 0.9860 | 3,378.48 | not recorded in table |
-| 2 segments / 2 threads | 18.1246s | 0.9940 | 1,900.17 | 0.7728ms |
-| 4 segments / 4 threads | 8.1387s | 0.9980 | 1,035.96 | 1.4544ms |
-| 8 segments / 8 threads | 4.6599s | 0.9940 | 570.12 | 2.4883ms |
+| Mode | Segment Search K | Build Time | Recall@10 | Batch QPS | Single p99 |
+|---|---:|---:|---:|---:|---:|
+| Single graph baseline | n/a | 40.1198s | 0.9860 | 3,378.48 | not recorded in table |
+| 2 segments / 2 threads | 10 | 13.0571s | 0.9940 | 2,297.49 | 0.5456ms |
+| 4 segments / 4 threads | 10 | 6.1811s | 0.9980 | 1,597.28 | 0.9630ms |
+| 8 segments / 8 threads | 10 | 2.8071s | 0.9940 | 953.44 | 1.5424ms |
 
-Takeaway: segmented build gives a large wall-clock build-time win, but every
-query searches more independent graphs before merging results. It should remain
-opt-in until the query-throughput trade-off is tuned.
+Takeaway: native segmented batch search improves the segmented query path, but
+every query still searches each independent graph before merging global top-k.
+Segmented build remains opt-in: it is useful when build latency matters more
+than maximum query throughput.
 
 ### Historical 1M Result
 

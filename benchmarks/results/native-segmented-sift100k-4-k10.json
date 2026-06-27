@@ -1,0 +1,156 @@
+{
+  "schema_version": "benchmark.v1",
+  "environment": {
+    "created_at": "2026-06-27T17:51:46.003131+00:00",
+    "git_commit": "1a5e15a",
+    "git_dirty": true,
+    "python": "3.11.14",
+    "platform": "macOS-26.5.1-arm64-arm-64bit",
+    "numpy": "2.3.5",
+    "cython_available": true,
+    "cpp_available": true
+  },
+  "dataset": {
+    "name": "sift1m",
+    "size": 100000,
+    "dimension": 128,
+    "n_queries": 100,
+    "seed": 42
+  },
+  "config": {
+    "hnsw": {
+      "M": 16,
+      "ef_construction": 200,
+      "ef_search": 100,
+      "metric": "euclidean",
+      "segment_count": 4,
+      "build_threads": 4,
+      "segment_search_k": 10
+    },
+    "k": 10,
+    "warmup_queries": 10,
+    "distribution": null,
+    "subset": "medium"
+  },
+  "metrics": {
+    "build_time_seconds": 6.181121,
+    "vectors_per_second": 16178.3,
+    "cpp_build_stats": {
+      "vectors": 100000,
+      "dimensions": 128,
+      "max_layer": 17,
+      "directed_edges": 4798986,
+      "total_seconds": 23.589921709000002,
+      "construction_seconds": 23.536312207,
+      "search_seconds": 15.751794159001705,
+      "greedy_search_seconds": 0.7124289320000372,
+      "candidate_search_seconds": 15.039365226999967,
+      "prune_seconds": 4.139498151998768,
+      "csr_export_seconds": 0.053602833,
+      "uses_squared_l2": true,
+      "uses_float_l2_accumulation": true,
+      "search_calls": 1539122,
+      "greedy_search_calls": 1339191,
+      "candidate_search_calls": 199931,
+      "visited_resizes": 4,
+      "uses_reusable_search_heaps": true,
+      "search_heap_resizes": 12,
+      "uses_bounded_adjacency": true,
+      "uses_heuristic_neighbors": true,
+      "uses_heuristic_reverse_pruning": false,
+      "adjacency_layers_allocated": 199999,
+      "max_observed_degree": 32,
+      "distance_evaluations": 418968012,
+      "search_distance_evaluations": 200615415,
+      "neighbor_selection_distance_evaluations": 85916661,
+      "prune_distance_evaluations": 132435936,
+      "visited_nodes": 200615415,
+      "max_visited_nodes_per_search": 3932,
+      "candidate_heap_pushes": 62566858,
+      "result_heap_pushes": 62566858,
+      "neighbor_selection_calls": 199931,
+      "selected_degree_total": 4790773,
+      "average_selected_degree": 23.962131935517753,
+      "max_selected_degree": 32,
+      "prune_calls": 4782560,
+      "prune_input_total": 132435936,
+      "average_prune_input_size": 27.691432203673347,
+      "max_prune_input_size": 33
+    },
+    "segmented_build_stats": {
+      "uses_segmented_build": true,
+      "segment_count": 4,
+      "build_threads": 4,
+      "segment_offsets": [
+        0,
+        25000,
+        50000,
+        75000
+      ],
+      "segment_sizes": [
+        25000,
+        25000,
+        25000,
+        25000
+      ],
+      "segment_build_seconds": [
+        6.09148499998264,
+        5.893394917016849,
+        5.757297375006601,
+        6.086163125000894
+      ],
+      "total_wall_seconds": 6.181044250028208,
+      "sum_segment_build_seconds": 23.828340417006984,
+      "max_segment_build_seconds": 6.09148499998264
+    },
+    "search_time_seconds": 0.062606,
+    "qps": 1597.28,
+    "search": {
+      "uses_batch_api": true,
+      "native_segmented_batch": true
+    },
+    "latency_ms": {
+      "p50": 0.5098,
+      "p95": 0.796,
+      "p99": 0.963,
+      "average": 0.5328
+    },
+    "recall_at_k": 0.998,
+    "memory": {
+      "vector_data_mb": 48.83,
+      "query_data_mb": 0.05,
+      "graph": {
+        "python_nodes": 100000,
+        "python_graph_materialized": false,
+        "python_layers": 0,
+        "python_edges": 0,
+        "python_graph_mb": 12.207,
+        "cpp_layers": 68,
+        "cpp_edges": 4798986,
+        "cpp_graph_mb": 24.7919,
+        "total_edges_counted": 4798986,
+        "total_graph_mb": 36.999
+      },
+      "process_peak_rss_mb": 5497.41,
+      "process_peak_rss_delta_mb": 0.0
+    },
+    "persistence": {
+      "compact": {
+        "available": false,
+        "save_time_seconds": null,
+        "load_time_seconds": null,
+        "file_size_mb": null,
+        "process_peak_rss_mb": 5497.41,
+        "loaded_graph": null
+      },
+      "materialized": {
+        "available": false,
+        "save_time_seconds": null,
+        "load_time_seconds": null,
+        "file_size_mb": null,
+        "process_peak_rss_mb": 5497.41,
+        "loaded_graph": null
+      }
+    }
+  }
+}

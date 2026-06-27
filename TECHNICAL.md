@@ -1885,6 +1885,109 @@ HNSW construction is order-dependent.
 
 ---
 
+## Native Segmented HNSW Batch Search
+
+### What Was There Before
+
+Segmented HNSW already built independent compact CSR graphs in parallel, but
+querying still paid a Python coordination cost. For each query,
+`SegmentedHNSWIndex.search()` looped over every segment, called each segment's
+normal `HNSWIndex.search()`, appended global ids in Python, sorted the combined
+candidate list, and returned top-k. `search_batch()` repeated that same Python
+loop once per query.
+
+That made segmented build look worse than the native single-graph path during
+query benchmarks. The actual segment graph search was native, but the fanout and
+global merge were still orchestrated query-by-query in Python.
+
+### What Was Implemented
+
+The segmented query path now has a native batch route:
+
+- `src/index/hnsw_cpp_core.hpp` declares `HnswSegmentView` and
+  `search_segmented_batch()`.
+- `src/index/hnsw_cpp_core.cpp` searches each compact CSR segment in C++ and
+  merges global top-k results natively.
+- `src/index/hnsw_cpp.pyx` exposes the native function while keeping segment
+  vector and CSR arrays alive for raw pointers, and releases the GIL for the
+  native call.
+- `src/index/segmented_hnsw.py` detects native-compatible compact CSR segments,
+  routes `search_batch()` and single-query `search()` through the native batch
+  path, and falls back to the previous Python merge when a segment is not
+  eligible.
+- `benchmarks/benchmark.py` now measures throughput with `search_batch()`,
+  records `segment_search_k`, and records whether the native segmented batch
+  path was used.
+
+The tuning knob is `segment_search_k`. It controls how many candidates each
+segment contributes before the native global top-k merge. `None` means use
+`k`; values below `k` are clamped up to `k`.
+
+### Why This Matters
+
+Segmented build is a build-time optimization with an explicit query-time cost:
+each query must inspect multiple independent graphs. Moving fanout and merge
+into C++ removes Python from that hot path, making the remaining cost closer to
+the real algorithmic trade-off: number of segments, per-segment beam width,
+per-segment candidate count, and global merge size.
+
+This also makes benchmarks more honest. The QPS metric now measures the batch
+API that production-style callers would use, while the latency table still
+records single-query calls separately.
+
+### Measured Result
+
+SIFT1M 100k, 100 queries, `M=16`, `ef_construction=200`, `ef_search=100`,
+`k=10`, Euclidean distance:
+
+| Segments | Segment Search K | Build Time | Recall@10 | Batch QPS | Single Avg | Single p99 | Native Segmented Batch |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 2 | 10 | 13.0571s | 0.9940 | 2,297.49 | 0.3315ms | 0.5456ms | true |
+| 2 | 20 | 13.0733s | 0.9940 | 2,077.30 | 0.3626ms | 0.5695ms | true |
+| 4 | 10 | 6.1811s | 0.9980 | 1,597.28 | 0.5328ms | 0.9630ms | true |
+| 4 | 20 | 6.2569s | 0.9980 | 1,574.19 | 0.5310ms | 0.9079ms | true |
+| 8 | 10 | 2.8071s | 0.9940 | 953.44 | 0.9773ms | 1.5424ms | true |
+| 8 | 20 | 2.8346s | 0.9940 | 935.18 | 1.0673ms | 1.7509ms | true |
+
+Compared with the previous segmented query artifacts at `segment_search_k=k`,
+native segmented batch search improved QPS from `1,900.17` to `2,297.49` for 2
+segments, from `1,035.96` to `1,597.28` for 4 segments, and from `570.12` to
+`953.44` for 8 segments. The improvement gets larger as segment fanout grows
+because more of the old overhead lived in Python.
+
+The overfetch sweep did not improve recall in this matrix. `segment_search_k=20`
+preserved the same Recall@10 as `segment_search_k=10` while reducing QPS, so
+the current recommended benchmark setting is the default effective value
+`segment_search_k=k` until another dataset shows a recall gap.
+
+Artifacts:
+
+- `benchmarks/results/native-segmented-sift100k-2-k10.json`
+- `benchmarks/results/native-segmented-sift100k-2-k20.json`
+- `benchmarks/results/native-segmented-sift100k-4-k10.json`
+- `benchmarks/results/native-segmented-sift100k-4-k20.json`
+- `benchmarks/results/native-segmented-sift100k-8-k10.json`
+- `benchmarks/results/native-segmented-sift100k-8-k20.json`
+
+Artifact note: all six runs record git commit `1a5e15a`. The first run records
+`git_dirty=false`; later runs record `git_dirty=true` because earlier
+newly-generated benchmark artifacts from the same matrix were already present in
+the worktree while the remaining matrix entries were executed. No code changes
+were made between the six SIFT1M runs.
+
+### Next Steps
+
+- Keep segmented build opt-in because single-graph search still has higher QPS
+  when build latency is less important.
+- Benchmark a clean current 1M C++/CSR run before using 1M numbers as headline
+  current-performance claims.
+- Explore segment routing or early termination so queries do not always search
+  every segment.
+- Profile whether native segmented search should parallelize across segments
+  for high segment counts.
+
+---
+
 ## Future Improvements
 
 ### Phase 6 (Advanced Features)
