@@ -30,6 +30,17 @@ struct CsrLayerView {
     int neighbors_len;
 };
 
+struct HnswSegmentView {
+    const float* vectors;
+    int n_vectors;
+    int dimension;
+    const CsrLayerView* layers;
+    int n_layers;
+    int entry_point;
+    int max_layer;
+    int global_offset;
+};
+
 struct BuildStats {
     int vectors = 0;
     int dimensions = 0;
@@ -109,6 +120,18 @@ std::vector<std::vector<SearchResult>> search_batch(
     int max_layer,
     int k,
     int ef,
+    const std::string& metric
+);
+
+std::vector<std::vector<SearchResult>> search_segmented_batch(
+    const float* queries,
+    int n_queries,
+    int dimension,
+    const HnswSegmentView* segments,
+    int n_segments,
+    int k,
+    int ef,
+    int segment_search_k,
     const std::string& metric
 );
 

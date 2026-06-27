@@ -38,6 +38,16 @@ cdef extern from "hnsw_cpp_core.hpp" namespace "vectordb":
         const int* neighbors
         int neighbors_len
 
+    cdef cppclass CppHnswSegmentView "vectordb::HnswSegmentView":
+        const float* vectors
+        int n_vectors
+        int dimension
+        const CppCsrLayerView* layers
+        int n_layers
+        int entry_point
+        int max_layer
+        int global_offset
+
     cdef cppclass CppBuildStats "vectordb::BuildStats":
         int vectors
         int dimensions
@@ -117,6 +127,18 @@ cdef extern from "hnsw_cpp_core.hpp" namespace "vectordb":
         int ef,
         const string& metric
     ) except +
+
+    vector[vector[CppSearchResult]] cpp_search_segmented_batch "vectordb::search_segmented_batch"(
+        const float* queries,
+        int n_queries,
+        int dimension,
+        const CppHnswSegmentView* segments,
+        int n_segments,
+        int k,
+        int ef,
+        int segment_search_k,
+        const string& metric
+    ) except + nogil
 
     vector[int] cpp_prune_connections "vectordb::prune_connections"(
         const float* vectors,
@@ -267,6 +289,106 @@ def search_batch(
         ef,
         metric_cpp,
     )
+
+    cdef Py_ssize_t i
+    cdef Py_ssize_t j
+    cdef list output = []
+    cdef list query_results
+    for i in range(raw.size()):
+        query_results = []
+        for j in range(raw[i].size()):
+            query_results.append((raw[i][j].id, raw[i][j].distance))
+        output.append(query_results)
+
+    return output
+
+
+def search_segmented_batch(
+    queries,
+    segments,
+    int k,
+    int ef,
+    int segment_search_k,
+    str metric,
+):
+    """
+    Search multiple compact CSR HNSW segments and merge global top-k natively.
+    """
+    cdef cnp.ndarray[cnp.float32_t, ndim=2, mode="c"] queries_arr = np.ascontiguousarray(
+        queries, dtype=np.float32
+    )
+    cdef int query_dimension = <int> queries_arr.shape[1]
+    cdef list segment_list = list(segments)
+    cdef vector[CppHnswSegmentView] segment_views
+    cdef vector[vector[CppCsrLayerView]] all_layer_views
+    cdef CppHnswSegmentView segment_view
+    cdef CppCsrLayerView layer_view
+    cdef list keepalive = []
+    cdef object segment
+    cdef object layers
+    cdef object layer
+    cdef object layer_data
+    cdef cnp.ndarray[cnp.float32_t, ndim=2, mode="c"] vectors_arr
+    cdef cnp.ndarray[cnp.int32_t, ndim=1, mode="c"] offsets_arr
+    cdef cnp.ndarray[cnp.int32_t, ndim=1, mode="c"] neighbors_arr
+    cdef int segment_index = 0
+    cdef const CppHnswSegmentView* segment_ptr = NULL
+    cdef string metric_cpp = metric.encode("utf-8")
+
+    segment_views.reserve(<size_t> len(segment_list))
+    all_layer_views.resize(<size_t> len(segment_list))
+
+    for segment in segment_list:
+        vectors_arr = np.ascontiguousarray(segment["vectors"], dtype=np.float32)
+        if vectors_arr.shape[1] != query_dimension:
+            raise ValueError("segment dimension must match queries dimension")
+        keepalive.append(vectors_arr)
+
+        segment_view.vectors = <const float*> vectors_arr.data
+        segment_view.n_vectors = <int> vectors_arr.shape[0]
+        segment_view.dimension = <int> vectors_arr.shape[1]
+        segment_view.layers = NULL
+        segment_view.n_layers = 0
+        segment_view.entry_point = <int> segment["entry_point"]
+        segment_view.max_layer = <int> segment["max_layer"]
+        segment_view.global_offset = <int> segment["global_offset"]
+
+        layers = segment["layers"]
+        for layer in sorted(layers):
+            layer_data = layers[layer]
+            offsets_arr = np.ascontiguousarray(layer_data[0], dtype=np.int32)
+            neighbors_arr = np.ascontiguousarray(layer_data[1], dtype=np.int32)
+            keepalive.append((offsets_arr, neighbors_arr))
+
+            layer_view.layer = <int> layer
+            layer_view.offsets = <const int*> offsets_arr.data
+            layer_view.offsets_len = <int> offsets_arr.shape[0]
+            layer_view.neighbors = <const int*> neighbors_arr.data
+            layer_view.neighbors_len = <int> neighbors_arr.shape[0]
+            all_layer_views[segment_index].push_back(layer_view)
+
+        if all_layer_views[segment_index].size() > 0:
+            segment_view.layers = &all_layer_views[segment_index][0]
+        segment_view.n_layers = <int> all_layer_views[segment_index].size()
+        segment_views.push_back(segment_view)
+        segment_index += 1
+
+    if segment_views.size() > 0:
+        segment_ptr = &segment_views[0]
+
+    cdef vector[vector[CppSearchResult]] raw
+    with nogil:
+        raw = cpp_search_segmented_batch(
+            <const float*> queries_arr.data,
+            <int> queries_arr.shape[0],
+            query_dimension,
+            segment_ptr,
+            <int> segment_views.size(),
+            k,
+            ef,
+            segment_search_k,
+            metric_cpp,
+        )
 
     cdef Py_ssize_t i
     cdef Py_ssize_t j

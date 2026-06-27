@@ -1099,3 +1099,112 @@ def test_cpp_search_batch_matches_repeated_index_search():
             [distance for _vector_id, distance in repeated],
             abs=1e-6,
         )
+
+
+def test_cpp_search_segmented_batch_merges_global_euclidean_results():
+    from src.index import hnsw_cpp
+
+    queries = np.array([[0.05, 0.0], [10.1, 0.0]], dtype=np.float32)
+    left_vectors = np.array([[0.0, 0.0], [0.2, 0.0]], dtype=np.float32)
+    right_vectors = np.array([[10.0, 0.0], [10.3, 0.0]], dtype=np.float32)
+    full_offsets = np.array([0, 1, 2], dtype=np.int32)
+    full_neighbors = np.array([1, 0], dtype=np.int32)
+
+    segments = [
+        {
+            "vectors": left_vectors,
+            "layers": {0: (full_offsets, full_neighbors)},
+            "entry_point": 0,
+            "max_layer": 0,
+            "global_offset": 0,
+        },
+        {
+            "vectors": right_vectors,
+            "layers": {0: (full_offsets, full_neighbors)},
+            "entry_point": 0,
+            "max_layer": 0,
+            "global_offset": 2,
+        },
+    ]
+
+    results = hnsw_cpp.search_segmented_batch(
+        queries=queries,
+        segments=segments,
+        k=2,
+        ef=4,
+        segment_search_k=2,
+        metric="euclidean",
+    )
+
+    assert [[vector_id for vector_id, _distance in row] for row in results] == [
+        [0, 1],
+        [2, 3],
+    ]
+    assert results[0][0][1] == pytest.approx(0.05, abs=1e-6)
+    assert results[1][0][1] == pytest.approx(0.1, abs=1e-6)
+
+
+def test_cpp_search_segmented_batch_merges_cosine_by_descending_similarity():
+    from src.index import hnsw_cpp
+
+    queries = np.array([[1.0, 0.0]], dtype=np.float32)
+    left_vectors = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    right_vectors = np.array([[0.8, 0.2], [0.6, 0.4]], dtype=np.float32)
+    full_offsets = np.array([0, 1, 2], dtype=np.int32)
+    full_neighbors = np.array([1, 0], dtype=np.int32)
+
+    segments = [
+        {
+            "vectors": left_vectors,
+            "layers": {0: (full_offsets, full_neighbors)},
+            "entry_point": 0,
+            "max_layer": 0,
+            "global_offset": 0,
+        },
+        {
+            "vectors": right_vectors,
+            "layers": {0: (full_offsets, full_neighbors)},
+            "entry_point": 0,
+            "max_layer": 0,
+            "global_offset": 2,
+        },
+    ]
+
+    results = hnsw_cpp.search_segmented_batch(
+        queries=queries,
+        segments=segments,
+        k=3,
+        ef=4,
+        segment_search_k=2,
+        metric="cosine",
+    )
+
+    assert [vector_id for vector_id, _score in results[0]] == [0, 2, 3]
+    assert results[0][0][1] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_cpp_search_segmented_batch_rejects_dimension_mismatch():
+    from src.index import hnsw_cpp
+
+    queries = np.array([[0.0, 0.0]], dtype=np.float32)
+    vectors = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+    offsets = np.array([0, 0], dtype=np.int32)
+    neighbors = np.array([], dtype=np.int32)
+
+    with pytest.raises(ValueError, match="segment dimension must match queries dimension"):
+        hnsw_cpp.search_segmented_batch(
+            queries=queries,
+            segments=[
+                {
+                    "vectors": vectors,
+                    "layers": {0: (offsets, neighbors)},
+                    "entry_point": 0,
+                    "max_layer": 0,
+                    "global_offset": 0,
+                }
+            ],
+            k=1,
+            ef=1,
+            segment_search_k=1,
+            metric="euclidean",
+        )

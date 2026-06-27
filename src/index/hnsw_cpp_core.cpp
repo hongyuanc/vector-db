@@ -621,6 +621,20 @@ std::vector<SearchResult> search_csr_layer(
     return output;
 }
 
+bool public_result_less(
+    const SearchResult& left,
+    const SearchResult& right,
+    bool use_euclidean
+) {
+    if (left.distance == right.distance) {
+        return left.id < right.id;
+    }
+    if (use_euclidean) {
+        return left.distance < right.distance;
+    }
+    return left.distance > right.distance;
+}
+
 }  // namespace
 
 std::vector<SearchResult> search_layer(
@@ -771,6 +785,180 @@ std::vector<std::vector<SearchResult>> search_batch(
             candidates.resize(static_cast<std::size_t>(k));
         }
         output.push_back(candidates);
+    }
+
+    return output;
+}
+
+std::vector<std::vector<SearchResult>> search_segmented_batch(
+    const float* queries,
+    int n_queries,
+    int dimension,
+    const HnswSegmentView* segments,
+    int n_segments,
+    int k,
+    int ef,
+    int segment_search_k,
+    const std::string& metric
+) {
+    if (metric != "euclidean" && metric != "cosine") {
+        throw std::invalid_argument("metric must be 'euclidean' or 'cosine'");
+    }
+
+    std::vector<std::vector<SearchResult>> output;
+    if (n_queries > 0) {
+        output.reserve(static_cast<std::size_t>(n_queries));
+    }
+
+    if (
+        queries == nullptr ||
+        segments == nullptr ||
+        n_queries <= 0 ||
+        dimension <= 0 ||
+        n_segments <= 0 ||
+        k <= 0
+    ) {
+        for (int query_index = 0; query_index < n_queries; ++query_index) {
+            output.push_back({});
+        }
+        return output;
+    }
+
+    const int per_segment_k = std::max(segment_search_k, k);
+    const int segment_beam_width = std::max(ef, per_segment_k);
+    const bool use_euclidean = metric == "euclidean";
+
+    struct PreparedSegment {
+        const HnswSegmentView* segment = nullptr;
+        std::vector<const CsrLayerView*> layer_by_number;
+        SearchScratch scratch;
+    };
+
+    std::vector<PreparedSegment> prepared_segments;
+    prepared_segments.reserve(static_cast<std::size_t>(n_segments));
+
+    for (int segment_index = 0; segment_index < n_segments; ++segment_index) {
+        const HnswSegmentView& segment = segments[segment_index];
+        if (segment.dimension != dimension) {
+            throw std::invalid_argument("segment dimension must match queries dimension");
+        }
+        if (
+            segment.vectors == nullptr ||
+            segment.layers == nullptr ||
+            segment.n_vectors <= 0 ||
+            segment.n_layers <= 0 ||
+            segment.entry_point < 0 ||
+            segment.entry_point >= segment.n_vectors ||
+            segment.max_layer < 0
+        ) {
+            continue;
+        }
+
+        prepared_segments.push_back(PreparedSegment());
+        PreparedSegment& prepared = prepared_segments.back();
+        prepared.segment = &segment;
+        prepared.layer_by_number.assign(
+            static_cast<std::size_t>(segment.max_layer + 1),
+            nullptr
+        );
+        prepared.scratch.ensure_size(static_cast<std::size_t>(segment.n_vectors));
+
+        for (int layer_index = 0; layer_index < segment.n_layers; ++layer_index) {
+            const CsrLayerView& layer = segment.layers[layer_index];
+            if (layer.layer >= 0 && layer.layer <= segment.max_layer) {
+                prepared.layer_by_number[static_cast<std::size_t>(layer.layer)] = &layer;
+            }
+        }
+    }
+
+    for (int query_index = 0; query_index < n_queries; ++query_index) {
+        const float* query = queries + (static_cast<std::size_t>(query_index) * dimension);
+        std::vector<SearchResult> merged;
+        merged.reserve(
+            static_cast<std::size_t>(prepared_segments.size()) *
+            static_cast<std::size_t>(per_segment_k)
+        );
+
+        for (PreparedSegment& prepared : prepared_segments) {
+            const HnswSegmentView& segment = *prepared.segment;
+            std::vector<int> nearest;
+            nearest.push_back(segment.entry_point);
+
+            for (int layer = segment.max_layer; layer > 0; --layer) {
+                const CsrLayerView* layer_view =
+                    prepared.layer_by_number[static_cast<std::size_t>(layer)];
+                if (layer_view == nullptr) {
+                    continue;
+                }
+
+                const std::vector<SearchResult> candidates = search_csr_layer(
+                    query,
+                    segment.vectors,
+                    segment.n_vectors,
+                    segment.dimension,
+                    layer_view->offsets,
+                    layer_view->offsets_len,
+                    layer_view->neighbors,
+                    layer_view->neighbors_len,
+                    nearest.data(),
+                    static_cast<int>(nearest.size()),
+                    1,
+                    use_euclidean,
+                    prepared.scratch
+                );
+                if (!candidates.empty()) {
+                    nearest.clear();
+                    nearest.push_back(candidates[0].id);
+                }
+            }
+
+            const CsrLayerView* base_layer = prepared.layer_by_number.empty()
+                ? nullptr
+                : prepared.layer_by_number[0];
+            if (base_layer == nullptr) {
+                continue;
+            }
+
+            std::vector<SearchResult> candidates = search_csr_layer(
+                query,
+                segment.vectors,
+                segment.n_vectors,
+                segment.dimension,
+                base_layer->offsets,
+                base_layer->offsets_len,
+                base_layer->neighbors,
+                base_layer->neighbors_len,
+                nearest.data(),
+                static_cast<int>(nearest.size()),
+                segment_beam_width,
+                use_euclidean,
+                prepared.scratch
+            );
+            if (static_cast<int>(candidates.size()) > per_segment_k) {
+                candidates.resize(static_cast<std::size_t>(per_segment_k));
+            }
+            for (const SearchResult& candidate : candidates) {
+                if (candidate.id < 0 || candidate.id >= segment.n_vectors) {
+                    continue;
+                }
+                merged.push_back({
+                    segment.global_offset + candidate.id,
+                    candidate.distance
+                });
+            }
+        }
+
+        std::sort(
+            merged.begin(),
+            merged.end(),
+            [use_euclidean](const SearchResult& left, const SearchResult& right) {
+                return public_result_less(left, right, use_euclidean);
+            }
+        );
+        if (static_cast<int>(merged.size()) > k) {
+            merged.resize(static_cast<std::size_t>(k));
+        }
+        output.push_back(merged);
     }
 
     return output;
