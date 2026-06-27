@@ -404,6 +404,7 @@ def run_benchmark_suite(
     download_if_missing: bool = False,
     segment_count: int = 1,
     build_threads: int = 1,
+    segment_search_k: int | None = None,
 ) -> dict[str, Any]:
     """Run one benchmark configuration and return structured results."""
     if metric not in {"euclidean", "cosine"}:
@@ -420,6 +421,8 @@ def run_benchmark_suite(
         raise ValueError("segment_count must be positive")
     if build_threads <= 0:
         raise ValueError("build_threads must be positive")
+    if segment_search_k is not None and segment_search_k <= 0:
+        raise ValueError("segment_search_k must be positive")
 
     vectors, queries = load_dataset(
         dataset,
@@ -444,6 +447,7 @@ def run_benchmark_suite(
             metric=metric,
             segment_count=segment_count,
             build_threads=build_threads,
+            segment_search_k=segment_search_k,
         )
     else:
         index = HNSWIndex(
@@ -461,15 +465,28 @@ def run_benchmark_suite(
         index.search(query, k=effective_k, ef=ef_search)
 
     latencies_ms: list[float] = []
-    predictions: list[list[int]] = []
+    predictions: list[list[int]]
+    batch_search = getattr(index, "search_batch", None)
+    uses_batch_api = callable(batch_search)
 
     search_start = time.perf_counter()
+    if uses_batch_api:
+        batch_results = batch_search(queries, k=effective_k, ef=ef_search)
+        predictions = [
+            [int(vector_id) for vector_id, _distance in results[:effective_k]]
+            for results in batch_results
+        ]
+    else:
+        predictions = []
+        for query in queries:
+            results = index.search(query, k=effective_k, ef=ef_search)
+            predictions.append([int(vector_id) for vector_id, _distance in results[:effective_k]])
+    search_time = time.perf_counter() - search_start
+
     for query in queries:
         query_start = time.perf_counter()
-        results = index.search(query, k=effective_k, ef=ef_search)
+        index.search(query, k=effective_k, ef=ef_search)
         latencies_ms.append((time.perf_counter() - query_start) * 1000)
-        predictions.append([int(vector_id) for vector_id, _distance in results[:effective_k]])
-    search_time = time.perf_counter() - search_start
 
     ground_truth = _compute_ground_truth(vectors, queries, effective_k, metric)
     recall = _calculate_recall(predictions, ground_truth, effective_k)
@@ -514,6 +531,7 @@ def run_benchmark_suite(
                 "metric": metric,
                 "segment_count": segment_count,
                 "build_threads": build_threads,
+                "segment_search_k": segment_search_k,
             },
             "k": effective_k,
             "warmup_queries": min(warmup_queries, len(queries)),
@@ -527,6 +545,12 @@ def run_benchmark_suite(
             "segmented_build_stats": getattr(index, "segmented_build_stats", None),
             "search_time_seconds": round(search_time, 6),
             "qps": round(len(queries) / search_time, 2) if search_time else 0.0,
+            "search": {
+                "uses_batch_api": uses_batch_api,
+                "native_segmented_batch": bool(
+                    getattr(index, "_last_search_used_native_segmented", False)
+                ),
+            },
             "latency_ms": _percentiles(latencies_ms),
             "recall_at_k": round(recall, 6),
             "memory": memory,
@@ -550,6 +574,7 @@ def format_markdown_report(result: dict[str, Any]) -> str:
     metrics = result["metrics"]
     latency = metrics["latency_ms"]
     memory = metrics["memory"]
+    search_metrics = metrics.get("search", {})
     cpp_build_stats = metrics["cpp_build_stats"]
     segmented_build_stats = metrics.get("segmented_build_stats")
     persistence = metrics["persistence"]
@@ -584,6 +609,7 @@ def format_markdown_report(result: dict[str, Any]) -> str:
             f"- ef_construction: `{config['ef_construction']}`",
             f"- ef_search: `{config['ef_search']}`",
             f"- Metric: `{config['metric']}`",
+            f"- Segment Search K: `{config.get('segment_search_k')}`",
             "",
             "## Metrics",
             "",
@@ -639,6 +665,8 @@ def format_markdown_report(result: dict[str, Any]) -> str:
                 else []
             ),
             f"| QPS | {metrics['qps']:.2f} |",
+            f"| Batch Search API | {search_metrics.get('uses_batch_api')} |",
+            f"| Native Segmented Batch | {search_metrics.get('native_segmented_batch')} |",
             f"| Average Latency | {latency['average']:.4f} ms |",
             f"| p50 Latency | {latency['p50']:.4f} ms |",
             f"| p95 Latency | {latency['p95']:.4f} ms |",
@@ -694,6 +722,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=1,
         help="Parallel segment build worker count",
     )
+    parser.add_argument(
+        "--segment-search-k",
+        type=int,
+        default=None,
+        help="Per-segment candidate count before native segmented global top-k merge",
+    )
     parser.add_argument("--output", default="results.json", help="JSON output path")
     parser.add_argument("--markdown-output", default=None, help="Optional Markdown output path")
     return parser
@@ -720,6 +754,7 @@ def main(argv: list[str] | None = None) -> int:
         download_if_missing=args.download_if_missing,
         segment_count=args.segments,
         build_threads=args.build_threads,
+        segment_search_k=args.segment_search_k,
     )
 
     output_path = Path(args.output)

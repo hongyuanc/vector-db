@@ -34,6 +34,7 @@ def test_run_benchmark_suite_returns_structured_metrics():
         "metric": "euclidean",
         "segment_count": 1,
         "build_threads": 1,
+        "segment_search_k": None,
     }
 
     metrics = result["metrics"]
@@ -84,6 +85,8 @@ def test_run_benchmark_suite_returns_structured_metrics():
     assert metrics["cpp_build_stats"]["vectors"] == 80
     assert metrics["cpp_build_stats"]["dimensions"] == 8
     assert metrics["qps"] > 0
+    assert metrics["search"]["uses_batch_api"] is True
+    assert metrics["search"]["native_segmented_batch"] is False
     assert 0.0 <= metrics["recall_at_k"] <= 1.0
     assert set(metrics["latency_ms"]) == {"p50", "p95", "p99", "average"}
     assert metrics["latency_ms"]["p99"] >= metrics["latency_ms"]["p50"]
@@ -214,10 +217,12 @@ def test_run_benchmark_suite_reports_segmented_build_stats():
         warmup_queries=1,
         segment_count=3,
         build_threads=1,
+        segment_search_k=6,
     )
 
     assert result["config"]["hnsw"]["segment_count"] == 3
     assert result["config"]["hnsw"]["build_threads"] == 1
+    assert result["config"]["hnsw"]["segment_search_k"] == 6
 
     segmented = result["metrics"]["segmented_build_stats"]
     assert segmented["uses_segmented_build"] is True
@@ -232,6 +237,8 @@ def test_run_benchmark_suite_reports_segmented_build_stats():
     assert cpp_build_stats["candidate_search_seconds"] >= 0.0
     assert result["metrics"]["persistence"]["compact"]["available"] is False
     assert result["metrics"]["persistence"]["materialized"]["available"] is False
+    assert result["metrics"]["search"]["uses_batch_api"] is True
+    assert result["metrics"]["search"]["native_segmented_batch"] is True
 
 
 def test_main_writes_segmented_markdown_rows(tmp_path):
@@ -263,6 +270,8 @@ def test_main_writes_segmented_markdown_rows(tmp_path):
             "3",
             "--build-threads",
             "1",
+            "--segment-search-k",
+            "6",
             "--output",
             str(json_path),
             "--markdown-output",
@@ -273,9 +282,13 @@ def test_main_writes_segmented_markdown_rows(tmp_path):
     assert exit_code == 0
     data = json.loads(json_path.read_text())
     assert data["metrics"]["segmented_build_stats"]["segment_count"] == 3
+    assert data["config"]["hnsw"]["segment_search_k"] == 6
+    assert data["metrics"]["search"]["native_segmented_batch"] is True
 
     markdown = markdown_path.read_text()
     assert "Segmented Build" in markdown
     assert "Segment Count" in markdown
     assert "Build Threads" in markdown
+    assert "Segment Search K" in markdown
+    assert "Native Segmented Batch" in markdown
     assert "Max Segment Build" in markdown
