@@ -70,6 +70,24 @@ class FakeExactSegment:
         return [self.search(query, k=k, ef=ef) for query in queries]
 
 
+class FakeNativeCompactSegment(FakeExactSegment):
+    def build(self, vectors):
+        super().build(vectors)
+        vector_count = len(self.vectors)
+        self._vectors_f32_cache = np.ascontiguousarray(self.vectors, dtype=np.float32)
+        self._cpp_graph_cache = {
+            0: (
+                np.arange(vector_count + 1, dtype=np.int32),
+                np.arange(vector_count, dtype=np.int32),
+            )
+        }
+        self.entry_point = 0 if vector_count else None
+        self.max_layer = 0
+
+    def search(self, query, k, ef=None):
+        raise AssertionError("native compact segment search should bypass Python search")
+
+
 def test_segmented_hnsw_builds_contiguous_segments_and_merges_global_results():
     from src.index.segmented_hnsw import SegmentedHNSWIndex
 
@@ -287,6 +305,181 @@ def test_segmented_hnsw_search_batch_preserves_query_order_and_global_ids():
     ]
 
 
+def test_segmented_hnsw_uses_native_segmented_search_batch(monkeypatch):
+    import src.index.segmented_hnsw as segmented_module
+    from src.index.segmented_hnsw import SegmentedHNSWIndex
+
+    calls = []
+
+    class FakeCppModule:
+        def search_segmented_batch(
+            self,
+            queries,
+            segments,
+            k,
+            ef,
+            segment_search_k,
+            metric,
+        ):
+            calls.append(
+                {
+                    "queries_shape": queries.shape,
+                    "segments": [
+                        {
+                            "vectors_shape": segment["vectors"].shape,
+                            "layers": sorted(segment["layers"]),
+                            "entry_point": segment["entry_point"],
+                            "max_layer": segment["max_layer"],
+                            "global_offset": segment["global_offset"],
+                        }
+                        for segment in segments
+                    ],
+                    "k": k,
+                    "ef": ef,
+                    "segment_search_k": segment_search_k,
+                    "metric": metric,
+                }
+            )
+            if queries.shape[0] == 1:
+                return [[(3, 0.1), (0, 0.2)]]
+            return [[(0, 0.1), (1, 0.2)], [(3, 0.1), (2, 0.2)]]
+
+    monkeypatch.setattr(segmented_module, "CPP_AVAILABLE", True, raising=False)
+    monkeypatch.setattr(segmented_module, "hnsw_cpp", FakeCppModule(), raising=False)
+
+    index = SegmentedHNSWIndex(
+        segment_count=2,
+        segment_search_k=3,
+        segment_factory=FakeNativeCompactSegment,
+    )
+    index.build(np.arange(8, dtype=np.float32).reshape(4, 2))
+
+    batch = index.search_batch(
+        np.array([[0.0, 0.0], [6.0, 7.0]], dtype=np.float32),
+        k=2,
+        ef=5,
+    )
+    single = index.search(np.array([6.0, 7.0], dtype=np.float32), k=2, ef=5)
+
+    assert batch == [[(0, 0.1), (1, 0.2)], [(3, 0.1), (2, 0.2)]]
+    assert single == [(3, 0.1), (0, 0.2)]
+    assert calls == [
+        {
+            "queries_shape": (2, 2),
+            "segments": [
+                {
+                    "vectors_shape": (2, 2),
+                    "layers": [0],
+                    "entry_point": 0,
+                    "max_layer": 0,
+                    "global_offset": 0,
+                },
+                {
+                    "vectors_shape": (2, 2),
+                    "layers": [0],
+                    "entry_point": 0,
+                    "max_layer": 0,
+                    "global_offset": 2,
+                },
+            ],
+            "k": 2,
+            "ef": 5,
+            "segment_search_k": 3,
+            "metric": "euclidean",
+        },
+        {
+            "queries_shape": (1, 2),
+            "segments": [
+                {
+                    "vectors_shape": (2, 2),
+                    "layers": [0],
+                    "entry_point": 0,
+                    "max_layer": 0,
+                    "global_offset": 0,
+                },
+                {
+                    "vectors_shape": (2, 2),
+                    "layers": [0],
+                    "entry_point": 0,
+                    "max_layer": 0,
+                    "global_offset": 2,
+                },
+            ],
+            "k": 2,
+            "ef": 5,
+            "segment_search_k": 3,
+            "metric": "euclidean",
+        },
+    ]
+    assert index._last_search_used_native_segmented is True
+
+
+def test_segmented_hnsw_segment_search_k_is_clamped_to_k(monkeypatch):
+    import src.index.segmented_hnsw as segmented_module
+    from src.index.segmented_hnsw import SegmentedHNSWIndex
+
+    calls = []
+
+    class FakeCppModule:
+        def search_segmented_batch(
+            self,
+            queries,
+            segments,
+            k,
+            ef,
+            segment_search_k,
+            metric,
+        ):
+            calls.append({"k": k, "segment_search_k": segment_search_k})
+            return [[(0, 0.0)] for _query in queries]
+
+    monkeypatch.setattr(segmented_module, "CPP_AVAILABLE", True, raising=False)
+    monkeypatch.setattr(segmented_module, "hnsw_cpp", FakeCppModule(), raising=False)
+
+    index = SegmentedHNSWIndex(
+        segment_count=1,
+        segment_search_k=1,
+        segment_factory=FakeNativeCompactSegment,
+    )
+    index.build(np.arange(8, dtype=np.float32).reshape(4, 2))
+
+    index.search_batch(np.array([[0.0, 0.0]], dtype=np.float32), k=4, ef=5)
+
+    assert calls == [{"k": 4, "segment_search_k": 4}]
+
+
+def test_segmented_hnsw_native_fallback_for_fake_segments(monkeypatch):
+    import src.index.segmented_hnsw as segmented_module
+    from src.index.segmented_hnsw import SegmentedHNSWIndex
+
+    class FakeCppModule:
+        def search_segmented_batch(self, **_kwargs):
+            raise AssertionError("native segmented search requires real compact segment caches")
+
+    monkeypatch.setattr(segmented_module, "CPP_AVAILABLE", True, raising=False)
+    monkeypatch.setattr(segmented_module, "hnsw_cpp", FakeCppModule(), raising=False)
+
+    vectors = np.array(
+        [
+            [0.0, 0.0],
+            [0.5, 0.0],
+            [10.0, 0.0],
+            [10.5, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    index = SegmentedHNSWIndex(
+        segment_count=2,
+        segment_factory=FakeExactSegment,
+    )
+    index.build(vectors)
+
+    batch = index.search_batch(np.array([[10.4, 0.0]], dtype=np.float32), k=2, ef=6)
+
+    assert [[vector_id for vector_id, _distance in row] for row in batch] == [[3, 2]]
+    assert index._last_search_used_native_segmented is False
+
+
 class FakeCosineSegment(FakeExactSegment):
     def search(self, query, k, ef=None):
         query_norm = np.linalg.norm(query)
@@ -407,3 +600,6 @@ def test_segmented_hnsw_rejects_invalid_segment_settings():
 
     with pytest.raises(ValueError, match="build_threads must be positive"):
         SegmentedHNSWIndex(segment_count=2, build_threads=0)
+
+    with pytest.raises(ValueError, match="segment_search_k must be positive"):
+        SegmentedHNSWIndex(segment_search_k=0)

@@ -7,7 +7,7 @@ from typing import Callable
 
 import numpy as np
 
-from src.index.hnsw import HNSWIndex, sample_hnsw_levels
+from src.index.hnsw import CPP_AVAILABLE, HNSWIndex, hnsw_cpp, sample_hnsw_levels
 
 
 CPP_SUM_KEYS = {
@@ -96,6 +96,7 @@ class SegmentedHNSWIndex:
         metric: str = "euclidean",
         segment_count: int = 2,
         build_threads: int = 1,
+        segment_search_k: int | None = None,
         segment_factory: Callable[..., HNSWIndex] = _default_segment_factory,
         executor_factory=ThreadPoolExecutor,
     ):
@@ -103,6 +104,8 @@ class SegmentedHNSWIndex:
             raise ValueError("segment_count must be positive")
         if build_threads <= 0:
             raise ValueError("build_threads must be positive")
+        if segment_search_k is not None and segment_search_k <= 0:
+            raise ValueError("segment_search_k must be positive")
         if metric not in {"euclidean", "cosine"}:
             raise ValueError(f"Unsupported metric: {metric}. Use 'euclidean' or 'cosine'")
 
@@ -113,6 +116,7 @@ class SegmentedHNSWIndex:
         self.metric = metric
         self.segment_count = segment_count
         self.build_threads = build_threads
+        self.segment_search_k = segment_search_k
         self._segment_factory = segment_factory
         self._executor_factory = executor_factory
 
@@ -122,6 +126,7 @@ class SegmentedHNSWIndex:
         self.segment_sizes: list[int] = []
         self.segmented_build_stats: dict | None = None
         self._last_cpp_build_stats: dict | None = None
+        self._last_search_used_native_segmented = False
 
     @property
     def graph_storage_mode(self) -> str:
@@ -138,6 +143,7 @@ class SegmentedHNSWIndex:
         self.segment_sizes = []
         self.segmented_build_stats = None
         self._last_cpp_build_stats = None
+        self._last_search_used_native_segmented = False
 
         if self.vectors.ndim != 2:
             raise ValueError("vectors must be a 2D array")
@@ -178,12 +184,29 @@ class SegmentedHNSWIndex:
         k: int,
         ef: int | None = None,
     ) -> list[tuple[int, float]]:
+        self._last_search_used_native_segmented = False
         if k <= 0 or not self.segments:
             return []
+        if ef is None:
+            ef = self.ef_search
+        ef = max(ef, k)
+
+        query_array = np.asarray(query, dtype=np.float32)
+        if query_array.ndim != 1:
+            raise ValueError("query must be a 1D array")
+
+        native_results = self._search_batch_native(
+            np.ascontiguousarray(query_array.reshape(1, -1), dtype=np.float32),
+            k=k,
+            ef=ef,
+        )
+        if native_results is not None:
+            return native_results[0]
+
         candidates: list[tuple[int, float]] = []
-        per_segment_k = max(k, 1)
+        per_segment_k = self._effective_segment_search_k(k)
         for segment in self.segments:
-            for local_id, distance in segment.index.search(query, k=per_segment_k, ef=ef):
+            for local_id, distance in segment.index.search(query_array, k=per_segment_k, ef=ef):
                 candidates.append((segment.start + int(local_id), float(distance)))
         if self.metric == "cosine":
             candidates.sort(key=lambda item: (-item[1], item[0]))
@@ -197,9 +220,28 @@ class SegmentedHNSWIndex:
         k: int,
         ef: int | None = None,
     ) -> list[list[tuple[int, float]]]:
+        self._last_search_used_native_segmented = False
         query_array = np.asarray(queries, dtype=np.float32)
         if query_array.ndim != 2:
             raise ValueError("queries must be a 2D array shaped (n_queries, dimension)")
+        if query_array.shape[0] == 0:
+            return []
+        if k <= 0:
+            return [[] for _query in range(query_array.shape[0])]
+        if not self.segments:
+            return [[] for _query in range(query_array.shape[0])]
+        if ef is None:
+            ef = self.ef_search
+        ef = max(ef, k)
+
+        native_results = self._search_batch_native(
+            np.ascontiguousarray(query_array, dtype=np.float32),
+            k=k,
+            ef=ef,
+        )
+        if native_results is not None:
+            return native_results
+
         return [self.search(query, k=k, ef=ef) for query in query_array]
 
     def estimate_graph_memory(self) -> dict:
@@ -265,6 +307,70 @@ class SegmentedHNSWIndex:
             segment_index.build(self.vectors[start:end])
         build_seconds = time.perf_counter() - build_start
         return HNSWSegment(start=start, end=end, index=segment_index, build_seconds=build_seconds)
+
+    def _effective_segment_search_k(self, k: int) -> int:
+        configured = self.segment_search_k if self.segment_search_k is not None else k
+        return max(k, configured)
+
+    def _native_segment_descriptors(self) -> list[dict] | None:
+        if (
+            not CPP_AVAILABLE
+            or hnsw_cpp is None
+            or not hasattr(hnsw_cpp, "search_segmented_batch")
+            or not self.segments
+        ):
+            return None
+
+        descriptors = []
+        for segment in self.segments:
+            segment_index = segment.index
+            if getattr(segment_index, "graph_storage_mode", None) != "compact_csr":
+                return None
+
+            vectors = getattr(segment_index, "_vectors_f32_cache", None)
+            graph_cache = getattr(segment_index, "_cpp_graph_cache", None)
+            entry_point = getattr(segment_index, "entry_point", None)
+            max_layer = getattr(segment_index, "max_layer", None)
+            if vectors is None or graph_cache is None or entry_point is None or max_layer is None:
+                return None
+            if not all(layer in graph_cache for layer in range(int(max_layer) + 1)):
+                return None
+
+            descriptors.append(
+                {
+                    "vectors": np.ascontiguousarray(vectors, dtype=np.float32),
+                    "layers": graph_cache,
+                    "entry_point": int(entry_point),
+                    "max_layer": int(max_layer),
+                    "global_offset": int(segment.start),
+                }
+            )
+
+        return descriptors
+
+    def _search_batch_native(
+        self,
+        query_array: np.ndarray,
+        k: int,
+        ef: int,
+    ) -> list[list[tuple[int, float]]] | None:
+        segments = self._native_segment_descriptors()
+        if segments is None:
+            return None
+
+        raw_results = hnsw_cpp.search_segmented_batch(
+            queries=query_array,
+            segments=segments,
+            k=k,
+            ef=ef,
+            segment_search_k=self._effective_segment_search_k(k),
+            metric=self.metric,
+        )
+        self._last_search_used_native_segmented = True
+        return [
+            [(int(vector_id), float(distance)) for vector_id, distance in query_results]
+            for query_results in raw_results
+        ]
 
     @staticmethod
     def _segment_ranges(total: int, segment_count: int) -> list[tuple[int, int]]:
